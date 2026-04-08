@@ -260,6 +260,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outdir", type=str, default="runs")
+    parser.add_argument("--grok_threshold", type=float, default=0.1, help="test error below this defines grokking")
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
