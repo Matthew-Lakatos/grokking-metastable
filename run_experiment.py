@@ -62,6 +62,18 @@ class ParityDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
+# models
+class TinyMLP(nn.Module):
+    def __init__(self, input_dim, hidden=256, num_classes=128):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.out = nn.Linear(hidden, num_classes)
+    def forward(self, x):
+        x = x.float()
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.out(x)
 
 class TinyTransformer(nn.Module):
     def __init__(self, vocab_size, emb=32, nhead=2, nlayers=2, num_classes=None):
