@@ -1,4 +1,5 @@
 import torch, numpy as np
+import torch.nn as nn
 
 def participation_ratio(activations):
     A = activations.reshape(activations.shape[0], -1)
