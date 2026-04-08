@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Full sweep and analysis
 
-echo "Starting sweep..."
+set -e
+
+echo "Starting full sweep..."
 python experiments/sweep_runner.py
 
 echo "Generating phase diagrams..."
