@@ -1,0 +1,13 @@
+task: modular_add
+model: tiny_mlp
+n: 500
+batch_size: 8
+lr: 1e-3
+weight_decay: 1e-5
+max_steps: 20000
+log_interval: 100
+seed: 0
+hidden: 256
+sigma_p: 1.0
+sigma_q: 1e-5
+outdir: runs/smoke
