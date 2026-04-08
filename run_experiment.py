@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-run_experiment.py
-Minimal experiment runner for grokking diagnostics.
-Modified to include gradient variance logging and geometry checkpointing.
+run_experiment.py - Corrected version
+Fixes: remove double .item() calls, speed up X_eval tensor creation.
 """
 
 import argparse
 import csv
 import os
 import time
-from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -17,7 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-# Import diagnostics – corrected imports
 from diagnostics.geometry import lanczos_top_k, participation_ratio_from_model
 from diagnostics.order_params import (
     compute_C_norm,
@@ -27,7 +24,7 @@ from diagnostics.order_params import (
     evaluate_test_error,
 )
 
-# generate datasets
+# creating datasets
 class ModularAdditionDataset(Dataset):
     def __init__(self, n_bits=7, n_samples=None):
         self.mod = 2 ** n_bits
@@ -41,10 +38,8 @@ class ModularAdditionDataset(Dataset):
             pairs = rng.choice(len(domain), size=n_samples, replace=False)
             pairs = [domain[i] for i in pairs]
         for a, b in pairs:
-            x = np.array([a, b], dtype=np.int64)
-            y = (a + b) % self.mod
-            self.inputs.append(x)
-            self.targets.append(y)
+            self.inputs.append([a, b])
+            self.targets.append((a + b) % self.mod)
     def __len__(self):
         return len(self.inputs)
     def __getitem__(self, idx):
@@ -81,17 +76,15 @@ class TinyTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=nlayers)
         self.pool = nn.Linear(emb, num_classes if num_classes is not None else vocab_size)
     def forward(self, x):
-        # x: (batch, seq_len) ints
-        e = self.emb(x).permute(1,0,2)  # seq_len, batch, emb
-        h = self.encoder(e)            # seq_len, batch, emb
-        h = h.mean(dim=0)              # batch, emb
+        e = self.emb(x).permute(1,0,2)
+        h = self.encoder(e)
+        h = h.mean(dim=0)
         return self.pool(h)
 
 # utils
 def make_dataloaders(task, n, batch_size):
     if task == "modular_add":
         ds = ModularAdditionDataset(n_bits=7, n_samples=n)
-        # encode inputs as two integers; model expects floats or embeddings
         def collate(batch):
             xs = torch.tensor([b[0] for b in batch], dtype=torch.long)
             ys = torch.tensor([b[1] for b in batch], dtype=torch.long)
@@ -105,9 +98,7 @@ def make_dataloaders(task, n, batch_size):
     else:
         raise ValueError("Unknown task")
 
-# Helper for gradient variance
 def compute_grad_variance_from_params(model):
-    """Return variance of all parameter gradients (flattened)."""
     grads = []
     for p in model.parameters():
         if p.grad is not None:
@@ -117,73 +108,66 @@ def compute_grad_variance_from_params(model):
     flat_grads = torch.cat(grads)
     return flat_grads.var().item()
 
-# Geometry checkpoint saver
 def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdir, suffix):
-    """Save Hessian top eigenvalues and participation ratio to .npz file."""
     os.makedirs(outdir, exist_ok=True)
     n_sample = min(256, len(X_sample))
     X_sub = X_sample[:n_sample].to(device)
     Y_sub = Y_sample[:n_sample].to(device)
-    
-    # Compute top-5 Hessian eigenvalues
     try:
         hess_top5 = lanczos_top_k(model, criterion, X_sub, Y_sub, k=5, n_iter=50)
     except Exception:
         hess_top5 = [float('nan')] * 5
-    # Participation ratio
     try:
         pr = participation_ratio_from_model(model, X_sub, layer_names=['fc2', 'fc1', 'encoder', 'pool'])
     except Exception:
         pr = float('nan')
-    
     np.savez(os.path.join(outdir, f'geometry_{suffix}.npz'),
              hess_top5=hess_top5,
              participation_ratio=pr,
              step=suffix)
     print(f"Saved geometry checkpoint: {suffix}")
 
-# training loop
+# training...
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.outdir, exist_ok=True)
     csv_path = os.path.join(args.outdir, f"log_seed{args.seed}.csv")
-    # Build data
+
     train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch)
+
     # Build model
     if args.model == "tiny_mlp":
         if args.task == "parity":
             input_dim = train_ds.X.shape[1]
             model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=2)
         else:
-            # modular add: represent inputs as two ints -> embed or flatten
             model = TinyMLP(input_dim=2, hidden=args.hidden, num_classes=2**7)
     elif args.model == "tiny_transformer":
         if args.task == "modular_add":
             model = TinyTransformer(vocab_size=2**7, emb=args.emb, num_classes=2**7)
         else:
-            raise NotImplementedError("Transformer only implemented for modular_add in skeleton")
+            raise NotImplementedError("Transformer only for modular_add")
     else:
         raise ValueError("Unknown model")
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     criterion = nn.CrossEntropyLoss()
-    # Prepare evaluation grid (full domain for small tasks)
+
+    # Evaluation data
     if args.task == "modular_add":
-        # enumerate full domain for alignment and test
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
-        X_eval = torch.tensor([x for x, _ in full_ds], dtype=torch.long)
-        Y_eval = torch.tensor([y for _, y in full_ds], dtype=torch.long)
-    else:
-        # parity: use train_ds as eval proxy
-        X_eval = torch.tensor(train_ds.X, dtype=torch.float32)
-        Y_eval = torch.tensor(train_ds.y, dtype=torch.long)
-    # canonical logits for modular_add: one-hot teacher
-    if args.task == "modular_add":
+        # Convert list of pairs to numpy array then tensor
+        X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
+        Y_list = np.array([y for _, y in full_ds], dtype=np.int64)
+        X_eval = torch.from_numpy(X_list)
+        Y_eval = torch.from_numpy(Y_list)
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
     else:
+        X_eval = torch.from_numpy(train_ds.X.astype(np.float32))
+        Y_eval = torch.from_numpy(train_ds.y)
         canonical_logits = None
 
-    # CSV header with T_eff_proxy
+    # CSV header
     header = ["step","time","train_loss","C_norm","C_PB","m","q_logit","q_ent","test_err","hess_top","PR","T_eff_proxy"]
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -193,11 +177,11 @@ def train(args):
     start_time = time.time()
     has_grokked = False
 
-    # Log initial state (step 0) and save pre-checkpoint
+    # Initial logging (step 0)
     model.eval()
     with torch.no_grad():
-        C_norm = compute_C_norm(model).item()
-        C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q).item()
+        C_norm = compute_C_norm(model)
+        C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
         logits_eval = []
         bs = 256
         for i in range(0, len(X_eval), bs):
@@ -208,20 +192,18 @@ def train(args):
                 le = model(xbatch)
             logits_eval.append(le.cpu())
         logits_eval = torch.cat(logits_eval, dim=0)
-        m = compute_alignment(logits_eval, canonical_logits).item() if canonical_logits is not None else 0.0
+        m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
         q_logit, q_ent = compute_precision(logits_eval)
         test_err = evaluate_test_error(model, X_eval, Y_eval)
-        # Hessian top (using top-5, store largest)
         try:
             hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
             hess_top = hess_top5[0]
         except Exception:
-            hess_top = float("nan")
-        # Participation ratio
+            hess_top = float('nan')
         try:
             pr = participation_ratio_from_model(model, X_eval[:512].to(device), layer_names=['fc2', 'fc1', 'encoder', 'pool'])
         except Exception:
-            pr = float("nan")
+            pr = float('nan')
         T_eff_proxy = 0.0
         elapsed = time.time() - start_time
         row = [step, f"{elapsed:.1f}", float('nan'), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
@@ -229,7 +211,7 @@ def train(args):
             writer = csv.writer(f)
             writer.writerow(row)
         print(f"[step {step}] test_err={test_err:.3f} (initial)")
-    # Save pre-checkpoint
+
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'pre')
 
     # Training loop
@@ -246,14 +228,13 @@ def train(args):
                     logits = model(inp)
                 else:
                     logits = model(xs)
-            else:  # parity
+            else:
                 xs, ys = batch
                 xs = xs.to(device)
                 ys = ys.to(device)
                 logits = model(xs)
             loss = criterion(logits, ys)
             loss.backward()
-            # Compute gradient variance before optimizer step
             grad_var = compute_grad_variance_from_params(model)
             optimizer.step()
             step += 1
@@ -261,8 +242,8 @@ def train(args):
             if step % args.log_interval == 0:
                 model.eval()
                 with torch.no_grad():
-                    C_norm = compute_C_norm(model).item()
-                    C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q).item()
+                    C_norm = compute_C_norm(model)
+                    C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
                     logits_eval = []
                     bs = 256
                     for i in range(0, len(X_eval), bs):
@@ -273,20 +254,18 @@ def train(args):
                             le = model(xbatch)
                         logits_eval.append(le.cpu())
                     logits_eval = torch.cat(logits_eval, dim=0)
-                    m = compute_alignment(logits_eval, canonical_logits).item() if canonical_logits is not None else 0.0
+                    m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
                     q_logit, q_ent = compute_precision(logits_eval)
                     test_err = evaluate_test_error(model, X_eval, Y_eval)
-                    # Hessian top
                     try:
                         hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
                         hess_top = hess_top5[0]
                     except Exception:
-                        hess_top = float("nan")
-                    # Participation ratio
+                        hess_top = float('nan')
                     try:
                         pr = participation_ratio_from_model(model, X_eval[:512].to(device), layer_names=['fc2', 'fc1', 'encoder', 'pool'])
                     except Exception:
-                        pr = float("nan")
+                        pr = float('nan')
                     T_eff_proxy = args.lr * grad_var / args.batch_size
                 elapsed = time.time() - start_time
                 row = [step, f"{elapsed:.1f}", float(loss.item()), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
@@ -295,26 +274,22 @@ def train(args):
                     writer.writerow(row)
                 print(f"[step {step}] loss={loss.item():.4f} test_err={test_err:.3f} T_eff={T_eff_proxy:.3e}")
 
-                # Check for grokking and save "at" checkpoint once
                 if not has_grokked and test_err < args.grok_threshold:
                     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'at')
                     has_grokked = True
 
             if step >= args.max_steps:
                 break
-        # end for batch
-    # end while
 
-    # Save post-checkpoint
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'post')
     print("Training finished. Logs saved to", csv_path)
 
-# CLI interface
+# CLI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add","parity"])
     parser.add_argument("--model", type=str, default="tiny_mlp", choices=["tiny_mlp","tiny_transformer"])
-    parser.add_argument("--n", type=int, default=500, help="dataset size (samples)")
+    parser.add_argument("--n", type=int, default=500)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-5)
@@ -326,8 +301,9 @@ if __name__ == "__main__":
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outdir", type=str, default="runs")
-    parser.add_argument("--grok_threshold", type=float, default=0.1, help="test error below this defines grokking")
+    parser.add_argument("--grok_threshold", type=float, default=0.1)
     args = parser.parse_args()
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     train(args)
