@@ -9,6 +9,21 @@ def participation_ratio(activations):
     if s2 <= 0 or s1 <= 0: return float('nan')
     return float((s1**2) / s2)
 
+def participation_ratio_from_model(model, x, layer_name='fc2'):
+    """
+    Extract activations from a specified layer (default 'fc2' for TinyMLP).
+    Returns participation ratio of the activation matrix.
+    """
+    activations = []
+    def hook(module, input, output):
+        activations.append(output.detach())
+    handle = getattr(model, layer_name).register_forward_hook(hook)
+    with torch.no_grad():
+        _ = model(x)
+    handle.remove()
+    act = activations[0]
+    return participation_ratio(act.cpu().numpy())
+
 def lanczos_top_eig(model, loss_fn, X_sample, Y_sample, k=1, iters=20):
     # simple power-iteration HVP-based top eigenvalue (returns list)
     device = next(model.parameters()).device
