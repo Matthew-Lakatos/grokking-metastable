@@ -1,6 +1,6 @@
 # Grokking as Metastable Complexity Dynamics
 
-Author: Matthew Lakatos\n
+Author: Matthew Lakatos
 Contact: 24mlaka@gmail.com
 
 ## Overview
