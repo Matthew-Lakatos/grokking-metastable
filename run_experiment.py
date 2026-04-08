@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-run_experiment.py - Corrected version
-Fixes: remove double .item() calls, speed up X_eval tensor creation.
+run_experiment.py - Corrected version with consistent argument names.
 """
 
 import argparse
@@ -24,7 +23,7 @@ from diagnostics.order_params import (
     evaluate_test_error,
 )
 
-# creating datasets
+# dataset creation
 class ModularAdditionDataset(Dataset):
     def __init__(self, n_bits=7, n_samples=None):
         self.mod = 2 ** n_bits
@@ -156,7 +155,6 @@ def train(args):
     # Evaluation data
     if args.task == "modular_add":
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
-        # Convert list of pairs to numpy array then tensor
         X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
         Y_list = np.array([y for _, y in full_ds], dtype=np.int64)
         X_eval = torch.from_numpy(X_list)
@@ -266,7 +264,7 @@ def train(args):
                         pr = participation_ratio_from_model(model, X_eval[:512].to(device), layer_names=['fc2', 'fc1', 'encoder', 'pool'])
                     except Exception:
                         pr = float('nan')
-                    T_eff_proxy = args.lr * grad_var / args.batch_size
+                    T_eff_proxy = args.lr * grad_var / args.batch   # FIXED: use args.batch (not batch_size)
                 elapsed = time.time() - start_time
                 row = [step, f"{elapsed:.1f}", float(loss.item()), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
                 with open(csv_path, "a", newline="") as f:
@@ -290,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add","parity"])
     parser.add_argument("--model", type=str, default="tiny_mlp", choices=["tiny_mlp","tiny_transformer"])
     parser.add_argument("--n", type=int, default=500)
-    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--batch", type=int, default=8)          # note: argument name is --batch
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-5)
     parser.add_argument("--sigma_p", type=float, default=1.0)
