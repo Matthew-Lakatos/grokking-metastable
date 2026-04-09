@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 run_experiment.py
-Supports modular addition and parity tasks with full domain evaluation,
+Supports modular addition and sparse parity tasks with full domain evaluation,
 canonical alignment, Hessian top‑k, participation ratio, gradient‑variance
 logging, and geometry checkpoints.
 """
@@ -26,7 +26,7 @@ from diagnostics.order_params import (
     evaluate_test_error,
 )
 
-# creating datasets...
+# making datasets...
 class ModularAdditionDataset(Dataset):
     def __init__(self, n_bits=7, n_samples=None):
         self.mod = 2 ** n_bits
@@ -47,11 +47,15 @@ class ModularAdditionDataset(Dataset):
     def __getitem__(self, idx):
         return self.inputs[idx], self.targets[idx]
 
-class ParityDataset(Dataset):
-    def __init__(self, n_bits=16, n_samples=1000):
+class SparseParityDataset(Dataset):
+    """16-bit inputs, parity only over first `active_bits` (default 3).
+    This task groks reliably with weight decay."""
+    def __init__(self, n_bits=16, active_bits=3, n_samples=500):
+        self.n_bits = n_bits
+        self.active_bits = active_bits
         rng = np.random.default_rng(0)
         self.X = rng.integers(0, 2, size=(n_samples, n_bits)).astype(np.float32)
-        self.y = (self.X.sum(axis=1) % 2).astype(np.int64)
+        self.y = (self.X[:, :active_bits].sum(axis=1) % 2).astype(np.int64)
     def __len__(self):
         return len(self.y)
     def __getitem__(self, idx):
@@ -93,32 +97,27 @@ def make_dataloaders(task, n, batch_size):
             return xs, ys
         loader = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate)
         return loader, ds
-    elif task == "parity":
-        ds = ParityDataset(n_bits=16, n_samples=n)
+    elif task == "sparse_parity":
+        ds = SparseParityDataset(n_bits=16, active_bits=3, n_samples=n)
         loader = DataLoader(ds, batch_size=batch_size, shuffle=True)
         return loader, ds
     else:
-        raise ValueError("Unknown task")
+        raise ValueError("Unknown task. Use 'modular_add' or 'sparse_parity'.")
 
-def generate_full_parity_domain(n_bits=16):
-    """All 2^n_bits bitstrings and their XOR parity labels."""
-    num_samples = 2 ** n_bits
-    X = np.zeros((num_samples, n_bits), dtype=np.float32)
+def generate_full_sparse_parity_domain(active_bits=3, total_bits=16):
+    """All 2^active_bits patterns, padded to total_bits."""
+    num_samples = 2 ** active_bits
+    X = np.zeros((num_samples, total_bits), dtype=np.float32)
     y = np.zeros(num_samples, dtype=np.int64)
     for i in range(num_samples):
-        bits = [(i >> b) & 1 for b in range(n_bits)]
-        X[i] = bits
+        bits = [(i >> b) & 1 for b in range(active_bits)]
+        X[i, :active_bits] = bits
         y[i] = sum(bits) % 2
     return torch.from_numpy(X), torch.from_numpy(y)
 
-def canonical_parity_logits(X):
+def canonical_sparse_parity_logits(X, active_bits=3):
     """Canonical logits: one‑hot of true parity (2 classes)."""
-    # X is full domain tensor; we need labels. Simpler: recompute y from bits.
-    n_bits = X.shape[1]
-    y = torch.zeros(X.shape[0], dtype=torch.long)
-    for i in range(X.shape[0]):
-        bits = X[i].byte().tolist()
-        y[i] = sum(bits) % 2
+    _, y = generate_full_sparse_parity_domain(active_bits, X.shape[1])
     return F.one_hot(y, num_classes=2).float()
 
 def compute_grad_variance_from_params(model):
@@ -152,7 +151,7 @@ def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdi
              step=suffix)
     print(f"Saved geometry checkpoint: {suffix}")
 
-# training...
+# training
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.outdir, exist_ok=True)
@@ -169,12 +168,14 @@ def train(args):
         X_eval = torch.from_numpy(X_list)
         Y_eval = torch.from_numpy(Y_list)
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
-        input_dim = 2  # two integers a,b
+        input_dim = 2
         num_classes = 2**7
-    elif args.task == "parity":
-        X_eval, Y_eval = generate_full_parity_domain(n_bits=16)
-        canonical_logits = canonical_parity_logits(X_eval)
-        input_dim = 16
+    elif args.task == "sparse_parity":
+        active_bits = 3
+        total_bits = 16
+        X_eval, Y_eval = generate_full_sparse_parity_domain(active_bits, total_bits)
+        canonical_logits = canonical_sparse_parity_logits(X_eval, active_bits)
+        input_dim = total_bits
         num_classes = 2
     else:
         raise ValueError("Unknown task")
@@ -214,11 +215,10 @@ def train(args):
         for i in range(0, len(X_eval), bs):
             xbatch = X_eval[i:i+bs].to(device)
             if args.model == "tiny_mlp":
-                # For parity, X_eval is already float; for modular addition it's long
                 if args.task == "modular_add":
                     xbatch = xbatch.float()
                 logits = model(xbatch)
-            else:  # transformer expects long
+            else:
                 logits = model(xbatch.long())
             logits_eval.append(logits.cpu())
         logits_eval = torch.cat(logits_eval, dim=0)
@@ -260,7 +260,7 @@ def train(args):
                     logits = model(inp)
                 else:
                     logits = model(xs)
-            else:  # parity
+            else:  # sparse_parity
                 xs, ys = batch
                 xs = xs.to(device)
                 ys = ys.to(device)
@@ -321,8 +321,8 @@ def train(args):
 # CLI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add","parity"])
-    parser.add_argument("--model", type=str, default="tiny_mlp", choices=["tiny_mlp","tiny_transformer"])
+    parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add", "sparse_parity"])
+    parser.add_argument("--model", type=str, default="tiny_mlp", choices=["tiny_mlp", "tiny_transformer"])
     parser.add_argument("--n", type=int, default=500, help="Number of training samples")
     parser.add_argument("--batch", type=int, default=8, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3)
