@@ -115,21 +115,34 @@ def canonical_sparse_parity_logits(X, active_bits=3):
     _, y = generate_full_sparse_parity_domain(active_bits, X.shape[1])
     return F.one_hot(y, num_classes=2).float()
 
-def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_size):
+def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_size, task, num_classes_mod=128):
     """
     FlucDis‑SGD using two *different* mini‑batches.
-    Returns T_eff estimate.
+    For modular addition, the batches are raw integers; we one‑hot encode them.
+    For sparse parity, they are already binary vectors.
     """
     x1, y1 = batch1
     x2, y2 = batch2
     x1, y1 = x1.to(device), y1.to(device)
     x2, y2 = x2.to(device), y2.to(device)
 
+    if task == "modular_add":
+        # One‑hot encode the inputs
+        a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
+        b1 = F.one_hot(x1[:, 1], num_classes=num_classes_mod)
+        x1_enc = torch.cat([a1, b1], dim=1).float()
+        a2 = F.one_hot(x2[:, 0], num_classes=num_classes_mod)
+        b2 = F.one_hot(x2[:, 1], num_classes=num_classes_mod)
+        x2_enc = torch.cat([a2, b2], dim=1).float()
+    else:
+        x1_enc = x1
+        x2_enc = x2
+
     # Replica 1
     rep1 = copy.deepcopy(model)
     rep1.train()
     rep1.zero_grad()
-    logits1 = rep1(x1)
+    logits1 = rep1(x1_enc)
     loss1 = criterion(logits1, y1)
     loss1.backward()
     grad1 = torch.cat([p.grad.detach().view(-1) for p in rep1.parameters()])
@@ -138,13 +151,13 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     rep2 = copy.deepcopy(model)
     rep2.train()
     rep2.zero_grad()
-    logits2 = rep2(x2)
+    logits2 = rep2(x2_enc)
     loss2 = criterion(logits2, y2)
     loss2.backward()
     grad2 = torch.cat([p.grad.detach().view(-1) for p in rep2.parameters()])
 
     diff = torch.mean((grad1 - grad2) ** 2).item()
-    T_eff = lr * diff / (2 * batch_size * x1.shape[0])
+    T_eff = lr * diff / (2 * batch_size * x1_enc.shape[0])
     return T_eff
 
 def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdir, suffix):
@@ -231,8 +244,6 @@ def train(args):
         bs = 256
         for i in range(0, len(X_eval), bs):
             xbatch = X_eval[i:i+bs].to(device)
-            # For modular addition, xbatch is already one‑hot; for sparse parity, it's binary.
-            # No additional transformation needed.
             logits = model(xbatch)
             logits_eval.append(logits.cpu())
         logits_eval = torch.cat(logits_eval, dim=0)
@@ -292,7 +303,8 @@ def train(args):
                 except StopIteration:
                     data_iter = iter(train_loader)
                     batch2 = next(data_iter)
-                T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch)
+                # Compute T_eff with one‑hot encoding inside the function for modular addition
+                T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch, args.task, num_classes_mod=128)
 
                 model.eval()
                 with torch.no_grad():
