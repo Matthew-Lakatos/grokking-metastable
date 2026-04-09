@@ -3,6 +3,8 @@
 **Author:** Matthew Lakatos  
 **Contact:** m.atthew.lakatos1@gmail.com
 
+Special thanks to Deepseek AI for generating the README.md
+
 ## Overview
 
 This repository contains the complete code and analysis for the paper  
@@ -57,10 +59,17 @@ Quick Start (Smoke Tests)
 Run the smoke tests to verify that everything works. This will run short experiments (2000 steps) for both modular addition and sparse parity.
 
 # Make the script executable
+
+```bash
 chmod +x reproducibility/reproduce.sh
+```
 
 # Run both smoke tests
+
+```bash
 ./reproducibility/reproduce.sh
+```
+
 Expected output: two folders runs/smoke_modular/ and runs/smoke_sparse/ each containing a CSV log (log_seed0.csv) and geometry checkpoints (geometry_pre.npz, geometry_post.npz). No errors should appear.
 
 Full Experiments (Reproducing Paper Results)
