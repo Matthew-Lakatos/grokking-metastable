@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-run_experiment.py – with robust FlucDis‑SGD using two different mini‑batches.
+run_experiment.py – with one‑hot encoding for modular addition and robust FlucDis‑SGD.
+Supports both modular addition (one‑hot) and sparse parity.
 """
 
 import argparse
@@ -8,13 +9,12 @@ import csv
 import os
 import time
 import copy
-from itertools import islice
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, Dataset
 
 from diagnostics.geometry import lanczos_top_k, participation_ratio_from_model
 from diagnostics.order_params import (
@@ -25,7 +25,7 @@ from diagnostics.order_params import (
     evaluate_test_error,
 )
 
-# ---------- Datasets (unchanged) ----------
+# ---------- Datasets ----------
 class ModularAdditionDataset(Dataset):
     def __init__(self, n_bits=7, n_samples=None):
         self.mod = 2 ** n_bits
@@ -143,7 +143,6 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     loss2.backward()
     grad2 = torch.cat([p.grad.detach().view(-1) for p in rep2.parameters()])
 
-    # Mean squared difference
     diff = torch.mean((grad1 - grad2) ** 2).item()
     T_eff = lr * diff / (2 * batch_size * x1.shape[0])
     return T_eff
@@ -184,7 +183,7 @@ def train(args):
         X_eval = torch.from_numpy(X_list)
         Y_eval = torch.from_numpy(Y_list)
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
-        input_dim = 2
+        input_dim = 256   # because we will one‑hot encode each input to 128 dims and concatenate
         num_classes = 2**7
     elif args.task == "sparse_parity":
         active_bits = args.active_bits
@@ -210,7 +209,6 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     criterion = nn.CrossEntropyLoss()
 
-    # CSV header
     header = ["step","time","train_loss","C_norm","C_PB","m","q_logit","q_ent","test_err","hess_top","PR","T_eff_proxy"]
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -231,11 +229,16 @@ def train(args):
             xbatch = X_eval[i:i+bs].to(device)
             if args.model == "tiny_mlp":
                 if args.task == "modular_add":
-                    xbatch = xbatch.float()
-                logits = model(xbatch)
-            else:
-                logits = model(xbatch.long())
-            logits_eval.append(logits.cpu())
+                    # One‑hot encode the inputs
+                    a = F.one_hot(xbatch[:, 0], num_classes=128)
+                    b = F.one_hot(xbatch[:, 1], num_classes=128)
+                    x_onehot = torch.cat([a, b], dim=1).float()
+                    le = model(x_onehot)
+                else:
+                    le = model(xbatch)
+            else:  # transformer expects long
+                le = model(xbatch.long())
+            logits_eval.append(le.cpu())
         logits_eval = torch.cat(logits_eval, dim=0)
         m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
         q_logit, q_ent = compute_precision(logits_eval)
@@ -259,8 +262,6 @@ def train(args):
 
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'pre')
 
-    # Training loop
-    # We need an iterator to get two different batches for FlucDis
     data_iter = iter(train_loader)
     while step < args.max_steps:
         for batch in train_loader:
@@ -271,7 +272,10 @@ def train(args):
                 xs = xs.to(device)
                 ys = ys.to(device)
                 if args.model == "tiny_mlp":
-                    inp = xs.float()
+                    # One‑hot encode
+                    a = F.one_hot(xs[:, 0], num_classes=128)
+                    b = F.one_hot(xs[:, 1], num_classes=128)
+                    inp = torch.cat([a, b], dim=1).float()
                     logits = model(inp)
                 else:
                     logits = model(xs)
@@ -286,12 +290,10 @@ def train(args):
             step += 1
 
             if step % args.log_interval == 0:
-                # --- Compute T_eff using two different batches ---
-                # Get a second batch (different from the current one)
+                # Get a second batch for FlucDis
                 try:
                     batch2 = next(data_iter)
                 except StopIteration:
-                    # Restart iterator if exhausted
                     data_iter = iter(train_loader)
                     batch2 = next(data_iter)
                 T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch)
@@ -306,11 +308,15 @@ def train(args):
                         xbatch = X_eval[i:i+bs].to(device)
                         if args.model == "tiny_mlp":
                             if args.task == "modular_add":
-                                xbatch = xbatch.float()
-                            logits = model(xbatch)
+                                a = F.one_hot(xbatch[:, 0], num_classes=128)
+                                b = F.one_hot(xbatch[:, 1], num_classes=128)
+                                x_onehot = torch.cat([a, b], dim=1).float()
+                                le = model(x_onehot)
+                            else:
+                                le = model(xbatch)
                         else:
-                            logits = model(xbatch.long())
-                        logits_eval.append(logits.cpu())
+                            le = model(xbatch.long())
+                        logits_eval.append(le.cpu())
                     logits_eval = torch.cat(logits_eval, dim=0)
                     m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
                     q_logit, q_ent = compute_precision(logits_eval)
@@ -341,7 +347,6 @@ def train(args):
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'post')
     print("Training finished. Logs saved to", csv_path)
 
-# ---------- CLI ----------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add", "sparse_parity"])
