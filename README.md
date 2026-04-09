@@ -77,6 +77,7 @@ Expected output: two folders runs/smoke_modular/ and runs/smoke_sparse/ each con
 Full Experiments (Reproducing Paper Results)
 To reproduce the main results of the paper, run the full sweep over:
 
+```text
 Tasks: modular_add, sparse_parity
 
 Regularisation λ (weight decay): 1e-3, 1e-2, 1e-1
@@ -88,6 +89,7 @@ Batch size: 64
 Seeds: 0,1,2,3,4 (5 seeds)
 
 Max steps: 50,000 for n=500, 100,000 for n=1000
+```
 
 Execute:
 
