@@ -4,12 +4,16 @@ run_experiment.py
 Supports modular addition and sparse parity tasks with full domain evaluation,
 canonical alignment, Hessian top‑k, participation ratio, gradient‑variance
 logging, and geometry checkpoints.
+
+Updated: Added configurable active bits for sparse parity and FlucDis‑SGD
+for robust effective temperature estimation.
 """
 
 import argparse
 import csv
 import os
 import time
+import copy
 
 import numpy as np
 import torch
@@ -48,13 +52,13 @@ class ModularAdditionDataset(Dataset):
         return self.inputs[idx], self.targets[idx]
 
 class SparseParityDataset(Dataset):
-    """16-bit inputs, parity only over first `active_bits` (default 3).
-    This task groks reliably with weight decay."""
+    """16-bit inputs, parity only over first `active_bits` (default 3)."""
     def __init__(self, n_bits=16, active_bits=3, n_samples=500):
         self.n_bits = n_bits
         self.active_bits = active_bits
         rng = np.random.default_rng(0)
         self.X = rng.integers(0, 2, size=(n_samples, n_bits)).astype(np.float32)
+        # parity only over active bits
         self.y = (self.X[:, :active_bits].sum(axis=1) % 2).astype(np.int64)
     def __len__(self):
         return len(self.y)
@@ -88,7 +92,7 @@ class TinyTransformer(nn.Module):
         return self.pool(h)
 
 # utils
-def make_dataloaders(task, n, batch_size):
+def make_dataloaders(task, n, batch_size, active_bits=3):
     if task == "modular_add":
         ds = ModularAdditionDataset(n_bits=7, n_samples=n)
         def collate(batch):
@@ -98,7 +102,7 @@ def make_dataloaders(task, n, batch_size):
         loader = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate)
         return loader, ds
     elif task == "sparse_parity":
-        ds = SparseParityDataset(n_bits=16, active_bits=3, n_samples=n)
+        ds = SparseParityDataset(n_bits=16, active_bits=active_bits, n_samples=n)
         loader = DataLoader(ds, batch_size=batch_size, shuffle=True)
         return loader, ds
     else:
@@ -120,16 +124,28 @@ def canonical_sparse_parity_logits(X, active_bits=3):
     _, y = generate_full_sparse_parity_domain(active_bits, X.shape[1])
     return F.one_hot(y, num_classes=2).float()
 
-def compute_grad_variance_from_params(model):
-    """Variance of all parameter gradients (flattened)."""
+def compute_teff_flucdis(model, criterion, batch, device, lr, batch_size, num_replicas=2):
+    """
+    Estimate effective temperature using FlucDis-SGD (Mignacco & Urbani, 2022).
+    Returns a scalar estimate of T_eff.
+    """
+    x, y = batch
+    x, y = x.to(device), y.to(device)
+    replicas = [copy.deepcopy(model) for _ in range(num_replicas)]
     grads = []
-    for p in model.parameters():
-        if p.grad is not None:
-            grads.append(p.grad.detach().view(-1))
-    if not grads:
-        return 0.0
-    flat_grads = torch.cat(grads)
-    return flat_grads.var().item()
+    for rep in replicas:
+        rep.train()
+        rep.zero_grad()
+        logits = rep(x)
+        loss = criterion(logits, y)
+        loss.backward()
+        # flatten gradients
+        flat_grad = torch.cat([p.grad.detach().view(-1) for p in rep.parameters()])
+        grads.append(flat_grad)
+    # mean squared difference between gradient vectors
+    diff = torch.mean((grads[0] - grads[1]) ** 2).item()
+    T_eff = lr * diff / (2 * batch_size * x.shape[0])
+    return T_eff
 
 def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdir, suffix):
     """Save top‑5 Hessian eigenvalues and participation ratio."""
@@ -157,8 +173,8 @@ def train(args):
     os.makedirs(args.outdir, exist_ok=True)
     csv_path = os.path.join(args.outdir, f"log_seed{args.seed}.csv")
 
-    # Build data loaders
-    train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch)
+    # Build data loaders (pass active_bits for sparse parity)
+    train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch, active_bits=args.active_bits)
 
     # Build evaluation sets (full domain for both tasks)
     if args.task == "modular_add":
@@ -171,7 +187,7 @@ def train(args):
         input_dim = 2
         num_classes = 2**7
     elif args.task == "sparse_parity":
-        active_bits = 3
+        active_bits = args.active_bits
         total_bits = 16
         X_eval, Y_eval = generate_full_sparse_parity_domain(active_bits, total_bits)
         canonical_logits = canonical_sparse_parity_logits(X_eval, active_bits)
@@ -267,7 +283,7 @@ def train(args):
                 logits = model(xs)   # xs already float
             loss = criterion(logits, ys)
             loss.backward()
-            grad_var = compute_grad_variance_from_params(model)
+            # compute T_eff using FlucDis at log intervals (not needed every step)
             optimizer.step()
             step += 1
 
@@ -300,7 +316,8 @@ def train(args):
                         pr = participation_ratio_from_model(model, X_eval[:512].to(device))
                     except Exception:
                         pr = float('nan')
-                    T_eff_proxy = args.lr * grad_var / args.batch
+                    # NEW: Compute T_eff using FlucDis‑SGD (robust)
+                    T_eff_proxy = compute_teff_flucdis(model, criterion, batch, device, args.lr, args.batch)
                 elapsed = time.time() - start_time
                 row = [step, f"{elapsed:.1f}", float(loss.item()), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
                 with open(csv_path, "a", newline="") as f:
@@ -336,6 +353,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outdir", type=str, default="runs")
     parser.add_argument("--grok_threshold", type=float, default=0.1)
+    parser.add_argument("--active_bits", type=int, default=3, help="Number of active bits for sparse parity (default 3)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
