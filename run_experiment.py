@@ -180,10 +180,14 @@ def train(args):
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
         X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
         Y_list = np.array([y for _, y in full_ds], dtype=np.int64)
-        X_eval = torch.from_numpy(X_list)
+        X_eval_raw = torch.from_numpy(X_list)   # shape (16384, 2)
         Y_eval = torch.from_numpy(Y_list)
+        # One‑hot encode the evaluation inputs
+        a_eval = F.one_hot(X_eval_raw[:, 0], num_classes=128)
+        b_eval = F.one_hot(X_eval_raw[:, 1], num_classes=128)
+        X_eval = torch.cat([a_eval, b_eval], dim=1).float()   # (16384, 256)
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
-        input_dim = 256   # because we will one‑hot encode each input to 128 dims and concatenate
+        input_dim = 256
         num_classes = 2**7
     elif args.task == "sparse_parity":
         active_bits = args.active_bits
@@ -227,22 +231,14 @@ def train(args):
         bs = 256
         for i in range(0, len(X_eval), bs):
             xbatch = X_eval[i:i+bs].to(device)
-            if args.model == "tiny_mlp":
-                if args.task == "modular_add":
-                    # One‑hot encode the inputs
-                    a = F.one_hot(xbatch[:, 0], num_classes=128)
-                    b = F.one_hot(xbatch[:, 1], num_classes=128)
-                    x_onehot = torch.cat([a, b], dim=1).float()
-                    le = model(x_onehot)
-                else:
-                    le = model(xbatch)
-            else:  # transformer expects long
-                le = model(xbatch.long())
-            logits_eval.append(le.cpu())
+            # For modular addition, xbatch is already one‑hot; for sparse parity, it's binary.
+            # No additional transformation needed.
+            logits = model(xbatch)
+            logits_eval.append(logits.cpu())
         logits_eval = torch.cat(logits_eval, dim=0)
         m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
         q_logit, q_ent = compute_precision(logits_eval)
-        test_err = evaluate_test_error(model, X_eval, Y_eval)
+        test_err = evaluate_test_error(model, X_eval, Y_eval)   # X_eval already one‑hot
         try:
             hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
             hess_top = hess_top5[0]
@@ -272,7 +268,7 @@ def train(args):
                 xs = xs.to(device)
                 ys = ys.to(device)
                 if args.model == "tiny_mlp":
-                    # One‑hot encode
+                    # One‑hot encode training batch
                     a = F.one_hot(xs[:, 0], num_classes=128)
                     b = F.one_hot(xs[:, 1], num_classes=128)
                     inp = torch.cat([a, b], dim=1).float()
@@ -306,17 +302,8 @@ def train(args):
                     bs = 256
                     for i in range(0, len(X_eval), bs):
                         xbatch = X_eval[i:i+bs].to(device)
-                        if args.model == "tiny_mlp":
-                            if args.task == "modular_add":
-                                a = F.one_hot(xbatch[:, 0], num_classes=128)
-                                b = F.one_hot(xbatch[:, 1], num_classes=128)
-                                x_onehot = torch.cat([a, b], dim=1).float()
-                                le = model(x_onehot)
-                            else:
-                                le = model(xbatch)
-                        else:
-                            le = model(xbatch.long())
-                        logits_eval.append(le.cpu())
+                        logits = model(xbatch)
+                        logits_eval.append(logits.cpu())
                     logits_eval = torch.cat(logits_eval, dim=0)
                     m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
                     q_logit, q_ent = compute_precision(logits_eval)
