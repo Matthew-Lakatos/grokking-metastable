@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-run_experiment.py
-Supports modular addition and sparse parity tasks with full domain evaluation,
-canonical alignment, Hessian top‑k, participation ratio, FlucDis‑SGD for T_eff,
-and geometry checkpoints.
+run_experiment.py – with robust FlucDis‑SGD using two different mini‑batches.
 """
 
 import argparse
@@ -11,12 +8,13 @@ import csv
 import os
 import time
 import copy
+from itertools import islice
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from diagnostics.geometry import lanczos_top_k, participation_ratio_from_model
 from diagnostics.order_params import (
@@ -27,7 +25,7 @@ from diagnostics.order_params import (
     evaluate_test_error,
 )
 
-# making datasets...
+# ---------- Datasets (unchanged) ----------
 class ModularAdditionDataset(Dataset):
     def __init__(self, n_bits=7, n_samples=None):
         self.mod = 2 ** n_bits
@@ -49,7 +47,6 @@ class ModularAdditionDataset(Dataset):
         return self.inputs[idx], self.targets[idx]
 
 class SparseParityDataset(Dataset):
-    """16-bit inputs, parity only over first `active_bits` (default 3)."""
     def __init__(self, n_bits=16, active_bits=3, n_samples=500):
         self.n_bits = n_bits
         self.active_bits = active_bits
@@ -87,7 +84,7 @@ class TinyTransformer(nn.Module):
         h = h.mean(dim=0)
         return self.pool(h)
 
-# utils
+# ---------- Utilities ----------
 def make_dataloaders(task, n, batch_size, active_bits=3):
     if task == "modular_add":
         ds = ModularAdditionDataset(n_bits=7, n_samples=n)
@@ -102,10 +99,9 @@ def make_dataloaders(task, n, batch_size, active_bits=3):
         loader = DataLoader(ds, batch_size=batch_size, shuffle=True)
         return loader, ds
     else:
-        raise ValueError("Unknown task. Use 'modular_add' or 'sparse_parity'.")
+        raise ValueError("Unknown task")
 
 def generate_full_sparse_parity_domain(active_bits=3, total_bits=16):
-    """All 2^active_bits patterns, padded to total_bits."""
     num_samples = 2 ** active_bits
     X = np.zeros((num_samples, total_bits), dtype=np.float32)
     y = np.zeros(num_samples, dtype=np.int64)
@@ -116,40 +112,43 @@ def generate_full_sparse_parity_domain(active_bits=3, total_bits=16):
     return torch.from_numpy(X), torch.from_numpy(y)
 
 def canonical_sparse_parity_logits(X, active_bits=3):
-    """Canonical logits: one‑hot of true parity (2 classes)."""
     _, y = generate_full_sparse_parity_domain(active_bits, X.shape[1])
     return F.one_hot(y, num_classes=2).float()
 
-def compute_teff_flucdis(model, criterion, batch, device, lr, batch_size, num_replicas=2):
+def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_size):
     """
-    Estimate effective temperature using FlucDis-SGD (Mignacco & Urbani, 2022).
-    This function must be called outside torch.no_grad() to allow gradient computation.
+    FlucDis‑SGD using two *different* mini‑batches.
+    Returns T_eff estimate.
     """
-    x, y = batch
-    x, y = x.to(device), y.to(device)
-    # Create two independent copies of the model (ensure they require gradients)
-    replicas = [copy.deepcopy(model) for _ in range(num_replicas)]
-    # Move replicas to device and set train mode
-    for rep in replicas:
-        rep.to(device)
-        rep.train()
-    grads = []
-    for rep in replicas:
-        rep.zero_grad()
-        logits = rep(x)
-        loss = criterion(logits, y)
-        # Compute gradients – this requires that we are not inside torch.no_grad()
-        loss.backward()
-        # Flatten gradients
-        flat_grad = torch.cat([p.grad.detach().view(-1) for p in rep.parameters()])
-        grads.append(flat_grad)
-    # Mean squared difference between gradient vectors
-    diff = torch.mean((grads[0] - grads[1]) ** 2).item()
-    T_eff = lr * diff / (2 * batch_size * x.shape[0])
+    x1, y1 = batch1
+    x2, y2 = batch2
+    x1, y1 = x1.to(device), y1.to(device)
+    x2, y2 = x2.to(device), y2.to(device)
+
+    # Replica 1
+    rep1 = copy.deepcopy(model)
+    rep1.train()
+    rep1.zero_grad()
+    logits1 = rep1(x1)
+    loss1 = criterion(logits1, y1)
+    loss1.backward()
+    grad1 = torch.cat([p.grad.detach().view(-1) for p in rep1.parameters()])
+
+    # Replica 2
+    rep2 = copy.deepcopy(model)
+    rep2.train()
+    rep2.zero_grad()
+    logits2 = rep2(x2)
+    loss2 = criterion(logits2, y2)
+    loss2.backward()
+    grad2 = torch.cat([p.grad.detach().view(-1) for p in rep2.parameters()])
+
+    # Mean squared difference
+    diff = torch.mean((grad1 - grad2) ** 2).item()
+    T_eff = lr * diff / (2 * batch_size * x1.shape[0])
     return T_eff
 
 def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdir, suffix):
-    """Save top‑5 Hessian eigenvalues and participation ratio."""
     os.makedirs(outdir, exist_ok=True)
     n_sample = min(256, len(X_sample))
     X_sub = X_sample[:n_sample].to(device)
@@ -168,16 +167,16 @@ def save_geometry_checkpoint(model, criterion, X_sample, Y_sample, device, outdi
              step=suffix)
     print(f"Saved geometry checkpoint: {suffix}")
 
-# training
+# ---------- Training ----------
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.outdir, exist_ok=True)
     csv_path = os.path.join(args.outdir, f"log_seed{args.seed}.csv")
 
-    # Build data loaders (pass active_bits for sparse parity)
+    # Build data loaders
     train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch, active_bits=args.active_bits)
 
-    # Build evaluation sets (full domain for both tasks)
+    # Build evaluation sets
     if args.task == "modular_add":
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
         X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
@@ -197,14 +196,14 @@ def train(args):
     else:
         raise ValueError("Unknown task")
 
-    # Build model
+    # Model
     if args.model == "tiny_mlp":
         model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
     elif args.model == "tiny_transformer":
         if args.task == "modular_add":
             model = TinyTransformer(vocab_size=2**7, emb=args.emb, num_classes=2**7)
         else:
-            raise NotImplementedError("Transformer only for modular_add in this version")
+            raise NotImplementedError("Transformer only for modular_add")
     else:
         raise ValueError("Unknown model")
     model.to(device)
@@ -226,7 +225,6 @@ def train(args):
     with torch.no_grad():
         C_norm = compute_C_norm(model)
         C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-        # Compute logits over X_eval in batches
         logits_eval = []
         bs = 256
         for i in range(0, len(X_eval), bs):
@@ -242,13 +240,11 @@ def train(args):
         m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
         q_logit, q_ent = compute_precision(logits_eval)
         test_err = evaluate_test_error(model, X_eval, Y_eval)
-        # Hessian top
         try:
             hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
             hess_top = hess_top5[0]
         except Exception:
             hess_top = float('nan')
-        # Participation ratio
         try:
             pr = participation_ratio_from_model(model, X_eval[:512].to(device))
         except Exception:
@@ -264,6 +260,8 @@ def train(args):
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'pre')
 
     # Training loop
+    # We need an iterator to get two different batches for FlucDis
+    data_iter = iter(train_loader)
     while step < args.max_steps:
         for batch in train_loader:
             model.train()
@@ -281,16 +279,22 @@ def train(args):
                 xs, ys = batch
                 xs = xs.to(device)
                 ys = ys.to(device)
-                logits = model(xs)   # xs already float
+                logits = model(xs)
             loss = criterion(logits, ys)
             loss.backward()
             optimizer.step()
             step += 1
 
             if step % args.log_interval == 0:
-                # Compute T_eff BEFORE entering no_grad (FlucDis needs gradients)
-                # But we need a fresh batch for the replicas; we can use the current batch
-                T_eff_proxy = compute_teff_flucdis(model, criterion, batch, device, args.lr, args.batch)
+                # --- Compute T_eff using two different batches ---
+                # Get a second batch (different from the current one)
+                try:
+                    batch2 = next(data_iter)
+                except StopIteration:
+                    # Restart iterator if exhausted
+                    data_iter = iter(train_loader)
+                    batch2 = next(data_iter)
+                T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch)
 
                 model.eval()
                 with torch.no_grad():
@@ -337,7 +341,7 @@ def train(args):
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'post')
     print("Training finished. Logs saved to", csv_path)
 
-# CLI
+# ---------- CLI ----------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="modular_add", choices=["modular_add", "sparse_parity"])
@@ -355,7 +359,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outdir", type=str, default="runs")
     parser.add_argument("--grok_threshold", type=float, default=0.1)
-    parser.add_argument("--active_bits", type=int, default=3, help="Number of active bits for sparse parity")
+    parser.add_argument("--active_bits", type=int, default=3, help="Active bits for sparse parity")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
