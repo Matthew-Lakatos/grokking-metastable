@@ -2,11 +2,8 @@
 """
 run_experiment.py
 Supports modular addition and sparse parity tasks with full domain evaluation,
-canonical alignment, Hessian top‑k, participation ratio, gradient‑variance
-logging, and geometry checkpoints.
-
-Updated: Added configurable active bits for sparse parity and FlucDis‑SGD
-for robust effective temperature estimation.
+canonical alignment, Hessian top‑k, participation ratio, FlucDis‑SGD for T_eff,
+and geometry checkpoints.
 """
 
 import argparse
@@ -58,14 +55,13 @@ class SparseParityDataset(Dataset):
         self.active_bits = active_bits
         rng = np.random.default_rng(0)
         self.X = rng.integers(0, 2, size=(n_samples, n_bits)).astype(np.float32)
-        # parity only over active bits
         self.y = (self.X[:, :active_bits].sum(axis=1) % 2).astype(np.int64)
     def __len__(self):
         return len(self.y)
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-# models
+# ---------- Models ----------
 class TinyMLP(nn.Module):
     def __init__(self, input_dim, hidden=256, num_classes=128):
         super().__init__()
@@ -127,22 +123,27 @@ def canonical_sparse_parity_logits(X, active_bits=3):
 def compute_teff_flucdis(model, criterion, batch, device, lr, batch_size, num_replicas=2):
     """
     Estimate effective temperature using FlucDis-SGD (Mignacco & Urbani, 2022).
-    Returns a scalar estimate of T_eff.
+    This function must be called outside torch.no_grad() to allow gradient computation.
     """
     x, y = batch
     x, y = x.to(device), y.to(device)
+    # Create two independent copies of the model (ensure they require gradients)
     replicas = [copy.deepcopy(model) for _ in range(num_replicas)]
+    # Move replicas to device and set train mode
+    for rep in replicas:
+        rep.to(device)
+        rep.train()
     grads = []
     for rep in replicas:
-        rep.train()
         rep.zero_grad()
         logits = rep(x)
         loss = criterion(logits, y)
+        # Compute gradients – this requires that we are not inside torch.no_grad()
         loss.backward()
-        # flatten gradients
+        # Flatten gradients
         flat_grad = torch.cat([p.grad.detach().view(-1) for p in rep.parameters()])
         grads.append(flat_grad)
-    # mean squared difference between gradient vectors
+    # Mean squared difference between gradient vectors
     diff = torch.mean((grads[0] - grads[1]) ** 2).item()
     T_eff = lr * diff / (2 * batch_size * x.shape[0])
     return T_eff
@@ -283,11 +284,14 @@ def train(args):
                 logits = model(xs)   # xs already float
             loss = criterion(logits, ys)
             loss.backward()
-            # compute T_eff using FlucDis at log intervals (not needed every step)
             optimizer.step()
             step += 1
 
             if step % args.log_interval == 0:
+                # Compute T_eff BEFORE entering no_grad (FlucDis needs gradients)
+                # But we need a fresh batch for the replicas; we can use the current batch
+                T_eff_proxy = compute_teff_flucdis(model, criterion, batch, device, args.lr, args.batch)
+
                 model.eval()
                 with torch.no_grad():
                     C_norm = compute_C_norm(model)
@@ -316,8 +320,6 @@ def train(args):
                         pr = participation_ratio_from_model(model, X_eval[:512].to(device))
                     except Exception:
                         pr = float('nan')
-                    # NEW: Compute T_eff using FlucDis‑SGD (robust)
-                    T_eff_proxy = compute_teff_flucdis(model, criterion, batch, device, args.lr, args.batch)
                 elapsed = time.time() - start_time
                 row = [step, f"{elapsed:.1f}", float(loss.item()), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
                 with open(csv_path, "a", newline="") as f:
@@ -353,7 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outdir", type=str, default="runs")
     parser.add_argument("--grok_threshold", type=float, default=0.1)
-    parser.add_argument("--active_bits", type=int, default=3, help="Number of active bits for sparse parity (default 3)")
+    parser.add_argument("--active_bits", type=int, default=3, help="Number of active bits for sparse parity")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
