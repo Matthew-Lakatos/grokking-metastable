@@ -129,7 +129,6 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     x2, y2 = x2.to(device), y2.to(device)
 
     if task == "modular_add":
-        # Determine model type from the passed model (original, not replica)
         if isinstance(model, TinyMLP):
             # One‑hot encode for MLP
             a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
@@ -147,6 +146,7 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
 
     # Replica 1
     rep1 = copy.deepcopy(model)
+    rep1.to(device)               # move to the same device
     rep1.train()
     rep1.zero_grad()
     logits1 = rep1(x1_enc)
@@ -156,6 +156,7 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
 
     # Replica 2
     rep2 = copy.deepcopy(model)
+    rep2.to(device)               # move to the same device
     rep2.train()
     rep2.zero_grad()
     logits2 = rep2(x2_enc)
@@ -210,7 +211,7 @@ def train(args):
         X_eval_transformer = X_eval_raw
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
         num_classes = 2**7
-        # Set X_eval based on model type (will be overwritten in loops)
+        # Set X_eval based on model type
         if args.model == "tiny_mlp":
             X_eval = X_eval_mlp
             input_dim = 256
@@ -257,7 +258,6 @@ def train(args):
     with torch.no_grad():
         C_norm = compute_C_norm(model)
         C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-        # Use the already defined X_eval (set above)
         logits_eval = []
         bs = 256
         for i in range(0, len(X_eval), bs):
@@ -327,7 +327,6 @@ def train(args):
                 with torch.no_grad():
                     C_norm = compute_C_norm(model)
                     C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-                    # Re‑compute logits_eval using the same X_eval (already correct for model)
                     logits_eval = []
                     bs = 256
                     for i in range(0, len(X_eval), bs):
