@@ -1,3 +1,11 @@
 #!/usr/bin/env bash
-python run_experiment.py --config configs/modular_addition.yaml
-python analysis/plot_trajectories.py --log runs/smoke/log_seed0.csv --out runs/smoke/trajectory.png
+python run_experiment.py \
+    --task modular_add \
+    --model tiny_mlp \
+    --n 500 \
+    --batch 8 \
+    --wd 1e-5 \
+    --seed 0 \
+    --outdir runs/smoke \
+    --max_steps 2000 \
+    --log_interval 100
