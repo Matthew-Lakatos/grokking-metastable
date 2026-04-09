@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-run_experiment.py – with one‑hot encoding for MLP and raw integers for transformer.
-Supports both modular addition (MLP/transformer) and sparse parity (MLP only).
+run_experiment.py – Final working version.
+Supports modular addition (MLP with one-hot encoding or transformer with raw integers)
+and sparse parity (MLP only).
 """
 
 import argparse
@@ -128,11 +129,9 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     x2, y2 = x2.to(device), y2.to(device)
 
     if task == "modular_add":
-        # For MLP we need one‑hot; for transformer we keep raw integers.
-        # We'll determine based on the model's first layer type? Simpler: always one‑hot for MLP,
-        # but here we don't know the model type. We'll handle it by checking the model class.
-        # Since this function is called with the same model as training, we can inspect it.
+        # Determine model type from the passed model (original, not replica)
         if isinstance(model, TinyMLP):
+            # One‑hot encode for MLP
             a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
             b1 = F.one_hot(x1[:, 1], num_classes=num_classes_mod)
             x1_enc = torch.cat([a1, b1], dim=1).float()
@@ -196,7 +195,7 @@ def train(args):
     # Build data loaders
     train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch, active_bits=args.active_bits)
 
-    # Build evaluation sets
+    # Build evaluation sets and model dimensions
     if args.task == "modular_add":
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
         X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
@@ -207,12 +206,17 @@ def train(args):
         a_eval = F.one_hot(X_eval_raw[:, 0], num_classes=128)
         b_eval = F.one_hot(X_eval_raw[:, 1], num_classes=128)
         X_eval_mlp = torch.cat([a_eval, b_eval], dim=1).float()   # (16384, 256)
-        # For transformer: raw integers (already)
+        # For transformer: raw integers
         X_eval_transformer = X_eval_raw
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
-        input_dim_mlp = 256
-        input_dim_transformer = 2   # not used directly, but we need to set model input dim
         num_classes = 2**7
+        # Set X_eval based on model type (will be overwritten in loops)
+        if args.model == "tiny_mlp":
+            X_eval = X_eval_mlp
+            input_dim = 256
+        else:
+            X_eval = X_eval_transformer
+            input_dim = 2   # not used for transformer, but needed for MLP branch
     elif args.task == "sparse_parity":
         active_bits = args.active_bits
         total_bits = 16
@@ -220,15 +224,14 @@ def train(args):
         canonical_logits = canonical_sparse_parity_logits(X_eval, active_bits)
         input_dim = total_bits
         num_classes = 2
+        if args.model != "tiny_mlp":
+            raise ValueError("Sparse parity only supports tiny_mlp")
     else:
         raise ValueError("Unknown task")
 
     # Build model
     if args.model == "tiny_mlp":
-        if args.task == "modular_add":
-            model = TinyMLP(input_dim=input_dim_mlp, hidden=args.hidden, num_classes=num_classes)
-        else:  # sparse_parity
-            model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
+        model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
     elif args.model == "tiny_transformer":
         if args.task == "modular_add":
             model = TinyTransformer(vocab_size=128, emb=args.emb, nhead=2, nlayers=2, num_classes=num_classes)
@@ -254,14 +257,7 @@ def train(args):
     with torch.no_grad():
         C_norm = compute_C_norm(model)
         C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-        # Choose evaluation tensor based on model type
-        if args.task == "modular_add":
-            if args.model == "tiny_mlp":
-                X_eval = X_eval_mlp
-            else:
-                X_eval = X_eval_transformer
-        else:
-            X_eval = X_eval  # already defined
+        # Use the already defined X_eval (set above)
         logits_eval = []
         bs = 256
         for i in range(0, len(X_eval), bs):
@@ -325,21 +321,13 @@ def train(args):
                 except StopIteration:
                     data_iter = iter(train_loader)
                     batch2 = next(data_iter)
-                # Compute T_eff (the function will inspect model type)
                 T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch, args.task, num_classes_mod=128)
 
                 model.eval()
                 with torch.no_grad():
                     C_norm = compute_C_norm(model)
                     C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-                    # Re‑select evaluation tensor (in case model type changed? no)
-                    if args.task == "modular_add":
-                        if args.model == "tiny_mlp":
-                            X_eval = X_eval_mlp
-                        else:
-                            X_eval = X_eval_transformer
-                    else:
-                        X_eval = X_eval  # already defined
+                    # Re‑compute logits_eval using the same X_eval (already correct for model)
                     logits_eval = []
                     bs = 256
                     for i in range(0, len(X_eval), bs):
