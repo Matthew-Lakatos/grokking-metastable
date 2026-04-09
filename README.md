@@ -19,6 +19,7 @@ This repository contains the complete code and analysis for the paper
 The code is self‑contained, uses only PyTorch and standard scientific Python libraries, and is designed for full reproducibility.
 
 ## Repository Structure
+```text
 grokking-metastable/
 ├── README.md
 ├── requirements.txt
@@ -38,7 +39,7 @@ grokking-metastable/
 │ ├── fit_arrhenius.py # Arrhenius scaling from master_results.csv
 │ └── phase_diagram.py # Phase diagrams (λ vs n)
 └── runs/ # Created at runtime; stores logs, checkpoints, results
-
+```
 
 ## Requirements
 
