@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-run_experiment.py – with one‑hot encoding for modular addition and robust FlucDis‑SGD.
-Supports both modular addition (one‑hot) and sparse parity.
+run_experiment.py – with one‑hot encoding for MLP and raw integers for transformer.
+Supports both modular addition (MLP/transformer) and sparse parity (MLP only).
 """
 
 import argparse
@@ -75,13 +75,14 @@ class TinyTransformer(nn.Module):
     def __init__(self, vocab_size, emb=32, nhead=2, nlayers=2, num_classes=None):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, emb)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=emb, nhead=nhead)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=emb, nhead=nhead, batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=nlayers)
         self.pool = nn.Linear(emb, num_classes if num_classes is not None else vocab_size)
     def forward(self, x):
-        e = self.emb(x).permute(1,0,2)
-        h = self.encoder(e)
-        h = h.mean(dim=0)
+        # x: (batch, seq_len) of token indices (long)
+        e = self.emb(x)                     # (batch, seq_len, emb)
+        h = self.encoder(e)                 # (batch, seq_len, emb)
+        h = h.mean(dim=1)                   # (batch, emb)
         return self.pool(h)
 
 # ---------- Utilities ----------
@@ -118,8 +119,8 @@ def canonical_sparse_parity_logits(X, active_bits=3):
 def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_size, task, num_classes_mod=128):
     """
     FlucDis‑SGD using two *different* mini‑batches.
-    For modular addition, the batches are raw integers; we one‑hot encode them.
-    For sparse parity, they are already binary vectors.
+    For modular addition, the batches are raw integers; we one‑hot encode them for MLP,
+    but for transformer we pass raw integers.
     """
     x1, y1 = batch1
     x2, y2 = batch2
@@ -127,14 +128,21 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     x2, y2 = x2.to(device), y2.to(device)
 
     if task == "modular_add":
-        # One‑hot encode the inputs
-        a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
-        b1 = F.one_hot(x1[:, 1], num_classes=num_classes_mod)
-        x1_enc = torch.cat([a1, b1], dim=1).float()
-        a2 = F.one_hot(x2[:, 0], num_classes=num_classes_mod)
-        b2 = F.one_hot(x2[:, 1], num_classes=num_classes_mod)
-        x2_enc = torch.cat([a2, b2], dim=1).float()
-    else:
+        # For MLP we need one‑hot; for transformer we keep raw integers.
+        # We'll determine based on the model's first layer type? Simpler: always one‑hot for MLP,
+        # but here we don't know the model type. We'll handle it by checking the model class.
+        # Since this function is called with the same model as training, we can inspect it.
+        if isinstance(model, TinyMLP):
+            a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
+            b1 = F.one_hot(x1[:, 1], num_classes=num_classes_mod)
+            x1_enc = torch.cat([a1, b1], dim=1).float()
+            a2 = F.one_hot(x2[:, 0], num_classes=num_classes_mod)
+            b2 = F.one_hot(x2[:, 1], num_classes=num_classes_mod)
+            x2_enc = torch.cat([a2, b2], dim=1).float()
+        else:  # transformer
+            x1_enc = x1
+            x2_enc = x2
+    else:  # sparse_parity
         x1_enc = x1
         x2_enc = x2
 
@@ -195,12 +203,15 @@ def train(args):
         Y_list = np.array([y for _, y in full_ds], dtype=np.int64)
         X_eval_raw = torch.from_numpy(X_list)   # shape (16384, 2)
         Y_eval = torch.from_numpy(Y_list)
-        # One‑hot encode the evaluation inputs
+        # For MLP: one‑hot encode
         a_eval = F.one_hot(X_eval_raw[:, 0], num_classes=128)
         b_eval = F.one_hot(X_eval_raw[:, 1], num_classes=128)
-        X_eval = torch.cat([a_eval, b_eval], dim=1).float()   # (16384, 256)
+        X_eval_mlp = torch.cat([a_eval, b_eval], dim=1).float()   # (16384, 256)
+        # For transformer: raw integers (already)
+        X_eval_transformer = X_eval_raw
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
-        input_dim = 256
+        input_dim_mlp = 256
+        input_dim_transformer = 2   # not used directly, but we need to set model input dim
         num_classes = 2**7
     elif args.task == "sparse_parity":
         active_bits = args.active_bits
@@ -212,12 +223,15 @@ def train(args):
     else:
         raise ValueError("Unknown task")
 
-    # Model
+    # Build model
     if args.model == "tiny_mlp":
-        model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
+        if args.task == "modular_add":
+            model = TinyMLP(input_dim=input_dim_mlp, hidden=args.hidden, num_classes=num_classes)
+        else:  # sparse_parity
+            model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
     elif args.model == "tiny_transformer":
         if args.task == "modular_add":
-            model = TinyTransformer(vocab_size=2**7, emb=args.emb, num_classes=2**7)
+            model = TinyTransformer(vocab_size=128, emb=args.emb, nhead=2, nlayers=2, num_classes=num_classes)
         else:
             raise NotImplementedError("Transformer only for modular_add")
     else:
@@ -240,6 +254,14 @@ def train(args):
     with torch.no_grad():
         C_norm = compute_C_norm(model)
         C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
+        # Choose evaluation tensor based on model type
+        if args.task == "modular_add":
+            if args.model == "tiny_mlp":
+                X_eval = X_eval_mlp
+            else:
+                X_eval = X_eval_transformer
+        else:
+            X_eval = X_eval  # already defined
         logits_eval = []
         bs = 256
         for i in range(0, len(X_eval), bs):
@@ -249,7 +271,7 @@ def train(args):
         logits_eval = torch.cat(logits_eval, dim=0)
         m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
         q_logit, q_ent = compute_precision(logits_eval)
-        test_err = evaluate_test_error(model, X_eval, Y_eval)   # X_eval already one‑hot
+        test_err = evaluate_test_error(model, X_eval, Y_eval)
         try:
             hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
             hess_top = hess_top5[0]
@@ -284,7 +306,7 @@ def train(args):
                     b = F.one_hot(xs[:, 1], num_classes=128)
                     inp = torch.cat([a, b], dim=1).float()
                     logits = model(inp)
-                else:
+                else:  # transformer
                     logits = model(xs)
             else:  # sparse_parity
                 xs, ys = batch
@@ -303,13 +325,21 @@ def train(args):
                 except StopIteration:
                     data_iter = iter(train_loader)
                     batch2 = next(data_iter)
-                # Compute T_eff with one‑hot encoding inside the function for modular addition
+                # Compute T_eff (the function will inspect model type)
                 T_eff_proxy = compute_teff_flucdis(model, criterion, batch, batch2, device, args.lr, args.batch, args.task, num_classes_mod=128)
 
                 model.eval()
                 with torch.no_grad():
                     C_norm = compute_C_norm(model)
                     C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
+                    # Re‑select evaluation tensor (in case model type changed? no)
+                    if args.task == "modular_add":
+                        if args.model == "tiny_mlp":
+                            X_eval = X_eval_mlp
+                        else:
+                            X_eval = X_eval_transformer
+                    else:
+                        X_eval = X_eval  # already defined
                     logits_eval = []
                     bs = 256
                     for i in range(0, len(X_eval), bs):
