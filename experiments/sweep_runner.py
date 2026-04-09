@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-
-# need python 3.7+ due to subprocess.run and capture_output=True
-# for older versions, remove capture_output and use stdout=PIPE, stderr=PIPE
-
 """
 Sweep runner for grokking experiments
 Runs both modular addition and sparse parity with:
@@ -10,7 +6,7 @@ Runs both modular addition and sparse parity with:
 - n = [500, 1000]
 - batch_size = 64
 - seeds = 0,1,2,3,4
-- max_steps = 50000 (n=500) or 100000 (n=1000)
+- max_steps = task‑specific (modular_add: 50k/100k, sparse_parity: 30k/50k)
 - grok_threshold = 0.1
 - Logs tau_grok and T_eff_proxy, saves master_results.csv.
 """
@@ -22,14 +18,8 @@ import os
 import time
 from itertools import product
 
-# helper: computes tau_grok and T_eff_proxy from a CSV log from a run
 def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=1e-3, min_residence=100):
-    """
-    Returns (tau_grok, T_eff_proxy_at_grok) or (nan, nan) if conditions not met.
-    Conditions:
-      - test_err first drops below grok_threshold
-      - train_loss was below train_loss_thresh for at least min_residence steps before that
-    """
+    """Returns (tau_grok, T_eff_proxy_at_grok) or (nan, nan) if conditions not met."""
     if not os.path.exists(csv_path):
         return np.nan, np.nan
     df = pd.read_csv(csv_path)
@@ -49,31 +39,31 @@ def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=1e-3, 
     if first_grok - t0 < min_residence:
         return np.nan, np.nan
 
-    # Get T_eff_proxy at grokking step (or nearest)
     teff_row = df[df['step'] == first_grok]
     if teff_row.empty:
         teff_row = df_before.iloc[-1:]
     teff_val = teff_row['T_eff_proxy'].values[0]
     return first_grok, teff_val
 
-# main sweep
 def main():
-    # Experiment grid
     tasks = ["modular_add", "sparse_parity"]
-    lambdas = [1e-3, 1e-2, 1e-1]          # weight decay (regularisation)
-    ns = [500, 1000]                       # training set sizes
-    batch_size = 64                        # fixed batch size
-    seeds = [0, 1, 2, 3, 4]               # 5 seeds for statistics
+    lambdas = [1e-3, 1e-2, 1e-1]
+    ns = [500, 1000]
+    batch_size = 64
+    seeds = [0, 1, 2, 3, 4]
     grok_threshold = 0.1
 
-    # Steps: 50k for n=500, 100k for n=1000
-    max_steps_dict = {500: 50000, 1000: 100000}
+    # Task‑ and n‑specific max steps (matching Kaggle script)
+    max_steps_dict = {
+        ("modular_add", 500): 50000,
+        ("modular_add", 1000): 100000,
+        ("sparse_parity", 500): 30000,
+        ("sparse_parity", 1000): 50000,
+    }
 
-    # Output file
     os.makedirs("runs", exist_ok=True)
     master_path = "runs/master_results.csv"
 
-    # Load already completed runs
     results = []
     completed = set()
     if os.path.exists(master_path):
@@ -96,7 +86,7 @@ def main():
             continue
 
         run_idx += 1
-        max_steps = max_steps_dict[n]
+        max_steps = max_steps_dict[(task, n)]
         outdir = f"runs/{task}/lambda_{wd}_n_{n}_batch_{batch_size}_seed_{seed}"
         os.makedirs(outdir, exist_ok=True)
 
@@ -137,12 +127,11 @@ def main():
             'T_eff_proxy': teff
         })
 
-        # Save incrementally
         pd.DataFrame(results).to_csv(master_path, index=False)
 
         elapsed_total = time.time() - start_time
         remaining = (total_runs - run_idx) * (elapsed_total / run_idx) if run_idx > 0 else 0
-        print(f"  Total elapsed: {elapsed_total/3600:.2f}h, estimated remaining: {remaining/3600:.2f}h")
+        print(f"  Total elapsed: {elapsed_total/3600:.2f}h, remaining: {remaining/3600:.2f}h")
 
     print("\nAll experiments completed. Results saved to", master_path)
 
