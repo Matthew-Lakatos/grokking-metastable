@@ -1,0 +1,14 @@
+task: sparse_parity
+model: tiny_mlp
+n: 500
+batch_size: 64
+lr: 1e-3
+weight_decay: 1e-2
+max_steps: 30000
+log_interval: 200
+seed: 0
+hidden: 256
+sigma_p: 1.0
+sigma_q: 1e-5
+outdir: runs/sparse_parity_smoke
+grok_threshold: 0.1
