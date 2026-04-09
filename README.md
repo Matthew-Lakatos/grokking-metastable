@@ -8,7 +8,7 @@ Special thanks to Deepseek AI for generating the README.md
 ## Overview
 
 This repository contains the complete code and analysis for the paper  
-*“Grokking as Metastable Complexity Dynamics”*. We formalise grokking – the phenomenon where a model suddenly generalises long after memorising the training data – as a metastable escape in a complexity‑regularised free‑energy landscape. The code implements:
+*“Grokking as Metastable Complexity Dynamics”*. Grokking is formalised – the phenomenon where a model suddenly generalises long after memorising the training data – as a metastable escape in a complexity‑regularised free‑energy landscape. The code implements:
 
 - Two algorithmic tasks: **modular addition** (p=128) and **sparse parity** (16‑bit inputs, parity over first 3 bits).
 - All order parameters defined in the paper: complexity \(C_{\mathrm{norm}}\) and \(C_{\mathrm{PB}}\), alignment \(m(t)\), precision \(q(t)\), test error \(\epsilon_{\mathrm{test}}(t)\).
@@ -45,9 +45,11 @@ grokking-metastable/
 
 ## Requirements
 
+```text
 - Python 3.8+
 - PyTorch ≥ 1.12
 - NumPy, Pandas, Matplotlib, SciPy, PyYAML, tqdm
+```
 
 Install with:
 
