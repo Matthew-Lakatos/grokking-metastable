@@ -1,7 +1,7 @@
 # Grokking as Metastable Complexity Dynamics
 
 **Author:** Matthew Lakatos  
-**Contact:** m.atthew.lakatos1@gmail.com
+**Contact:** m.atthew.lakatos1@gmail.com   
 **Special Thanks:** Deepseek AI for writing the README.md and code documentation
 
 ## Overview
