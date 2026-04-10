@@ -59,7 +59,6 @@ Run a short smoke test to verify that the transformer groks on modular addition:
 chmod +x reproducibility/reproduce.sh
 ```
 
-./reproducibility/reproduce.sh
 Expected output: a folder runs/smoke_transformer/ containing a CSV log and geometry checkpoints. The test should finish without errors and show test_err = 0.000 after ~7000 steps.
 
 Full Experiments (Reproducing the Paper Results)
