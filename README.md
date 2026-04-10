@@ -62,15 +62,7 @@ chmod +x reproducibility/reproduce.sh
 Expected output: a folder runs/smoke_transformer/ containing a CSV log and geometry checkpoints. The test should finish without errors and show test_err = 0.000 after ~7000 steps.
 
 Full Experiments (Reproducing the Paper Results)
-The main experiment is an Arrhenius sweep that varies the learning rate (hence the effective temperature 
-T
-e
-f
-f
-T 
-eff
-​
- ) while keeping all other hyperparameters fixed. It uses:
+The main experiment is an Arrhenius sweep that varies the learning rate (hence the effective temperature T_eff ) while keeping all other hyperparameters fixed. It uses:
 
 ```text
 Task: modular addition (p=128)
