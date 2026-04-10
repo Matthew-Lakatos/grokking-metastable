@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_experiment.py – Final working version.
+run_experiment.py – Final working version with AdamW.
 Supports modular addition (MLP with one-hot encoding or transformer with raw integers)
 and sparse parity (MLP only).
 """
@@ -241,7 +241,11 @@ def train(args):
     else:
         raise ValueError("Unknown model")
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+    # ---------- CRITICAL CHANGE: Use AdamW instead of Adam ----------
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    # ----------------------------------------------------------------
+
     criterion = nn.CrossEntropyLoss()
 
     header = ["step","time","train_loss","C_norm","C_PB","m","q_logit","q_ent","test_err","hess_top","PR","T_eff_proxy"]
