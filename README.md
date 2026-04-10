@@ -72,6 +72,7 @@ eff
 ​
  ) while keeping all other hyperparameters fixed. It uses:
 
+```text
 Task: modular addition (p=128)
 
 Model: tiny transformer (2 layers, 2 heads, embedding 32)
@@ -81,11 +82,14 @@ Fixed hyperparameters: n=4000, batch=512, weight_decay=0.3, max_steps=500 000
 Learning rates: 0.0005, 0.001, 0.002, 0.004, 0.008
 
 Seeds: 0,1,2 (3 seeds per learning rate)
+```
 
 To run the full sweep:
 
-bash
+```bash
 python experiments/sweep_runner.py
+```
+
 The script:
 
 Runs 15 configurations sequentially (5 LRs × 3 seeds).
@@ -122,6 +126,7 @@ Runtime: On a single NVIDIA T4 GPU, the full sweep takes approximately 12‑15 h
 Outputs and Metrics
 Each run produces:
 
+```text
 CSV log (log_seed{seed}.csv): columns – step, time, train_loss, C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, PR, T_eff_proxy.
 
 Geometry checkpoints (.npz):
@@ -133,6 +138,7 @@ geometry_at.npz – at the first step where test_err < 0.1.
 geometry_post.npz – at the end of training.
 
 The sweep script also produces arrhenius_transformer.png and a summary CSV with median grokking times.
+```
 
 Reproducibility Guarantee
 All random seeds are fixed (torch.manual_seed, np.random.seed).
