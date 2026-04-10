@@ -3,153 +3,149 @@
 **Author:** Matthew Lakatos  
 **Contact:** m.atthew.lakatos1@gmail.com
 
-Special thanks to Deepseek AI for generating the README.md
-
 ## Overview
 
 This repository contains the complete code and analysis for the paper  
-*“Grokking as Metastable Complexity Dynamics”*. Grokking is formalised – the phenomenon where a model suddenly generalises long after memorising the training data – as a metastable escape in a complexity‑regularised free‑energy landscape. The code implements:
+*“Grokking as Metastable Complexity Dynamics”*. Grokking – the phenomenon where a model suddenly generalises long after memorising the training data – is formalised as a metastable escape in a complexity‑regularised free‑energy landscape.
 
-- Two algorithmic tasks: **modular addition** (p=128) and **sparse parity** (16‑bit inputs, parity over first 3 bits).
+The code implements:
+
+- **Modular addition** (p=128) as the primary task, using a small transformer.
 - All order parameters defined in the paper: complexity \(C_{\mathrm{norm}}\) and \(C_{\mathrm{PB}}\), alignment \(m(t)\), precision \(q(t)\), test error \(\epsilon_{\mathrm{test}}(t)\).
-- Effective temperature \(T_{\mathrm{eff}}\) estimated from SGD noise (gradient variance, learning rate, batch size).
+- Effective temperature \(T_{\mathrm{eff}}\) estimated using **FlucDis‑SGD** (robust gradient‑difference method).
 - Geometric diagnostics: top‑5 Hessian eigenvalues (Lanczos) and participation ratio (intrinsic dimensionality).
 - Geometry checkpoints saved at **pre‑transition**, **at‑transition**, and **post‑transition**.
-- Full‑domain evaluation for both tasks (16384 pairs for modular addition, 8 patterns for sparse parity).
-- Arrhenius scaling analysis and phase diagrams.
+- Full‑domain evaluation for modular addition (16 384 pairs).
+- **Arrhenius scaling** analysis (log τ vs 1/T_eff) with linear regression.
 
 The code is self‑contained, uses only PyTorch and standard scientific Python libraries, and is designed for full reproducibility.
 
 ## Repository Structure
+
 ```text
 grokking-metastable/
 ├── README.md
 ├── requirements.txt
-├── run_experiment.py # Main training script (all tasks, all metrics)
+├── run_experiment.py # Main training script (transformer, metrics, checkpoints)
 ├── diagnostics/
 │ ├── init.py
 │ ├── geometry.py # Hessian (Lanczos) and participation ratio
 │ └── order_params.py # C_norm, C_PB, alignment, precision, test error
-├── configs/
-│ ├── modular_addition.yaml # Example config (not used directly, kept for reference)
-│ └── sparse_parity.yaml
 ├── reproducibility/
-│ └── reproduce.sh # Smoke tests for both tasks
+│ └── reproduce.sh # Smoke test for modular addition (transformer)
 ├── experiments/
-│ └── sweep_runner.py # Full experiment sweeps (both tasks, 5 seeds)
-├── analysis/
-│ ├── fit_arrhenius.py # Arrhenius scaling from master_results.csv
-│ └── phase_diagram.py # Phase diagrams (λ vs n)
-└── runs/ # Created at runtime; stores logs, checkpoints, results
+│ └── sweep_runner.py # Full Arrhenius sweep (varies learning rate)
+├── analysis/ # Optional post‑processing scripts
+│ ├── fit_arrhenius.py
+│ └── phase_diagram.py
+└── runs/ # Created at runtime – logs, checkpoints, results
 ```
 
 ## Requirements
 
-```text
 - Python 3.8+
 - PyTorch ≥ 1.12
 - NumPy, Pandas, Matplotlib, SciPy, PyYAML, tqdm
-```
 
 Install with:
 
 ```bash
 pip install -r requirements.txt
+Quick Start (Smoke Test)
+Run a short smoke test to verify that the transformer groks on modular addition:
 ```
-
-Quick Start (Smoke Tests)
-Run the smoke tests to verify that everything works. This will run short experiments (2000 steps) for both modular addition and sparse parity.
-
-# Make the script executable
 
 ```bash
 chmod +x reproducibility/reproduce.sh
 ```
 
-# Run both smoke tests
-
-```bash
 ./reproducibility/reproduce.sh
-```
+Expected output: a folder runs/smoke_transformer/ containing a CSV log and geometry checkpoints. The test should finish without errors and show test_err = 0.000 after ~7000 steps.
 
-Expected output: two folders runs/smoke_modular/ and runs/smoke_sparse/ each containing a CSV log (log_seed0.csv) and geometry checkpoints (geometry_pre.npz, geometry_post.npz). No errors should appear.
+Full Experiments (Reproducing the Paper Results)
+The main experiment is an Arrhenius sweep that varies the learning rate (hence the effective temperature 
+T
+e
+f
+f
+T 
+eff
+​
+ ) while keeping all other hyperparameters fixed. It uses:
 
-Full Experiments (Reproducing Paper Results)
-To reproduce the main results of the paper, run the full sweep over:
+Task: modular addition (p=128)
 
-```text
-Tasks: modular_add, sparse_parity
+Model: tiny transformer (2 layers, 2 heads, embedding 32)
 
-Regularisation λ (weight decay): 1e-3, 1e-2, 1e-1
+Fixed hyperparameters: n=4000, batch=512, weight_decay=0.3, max_steps=500 000
 
-Dataset size n: 500, 1000
+Learning rates: 0.0005, 0.001, 0.002, 0.004, 0.008
 
-Batch size: 64
+Seeds: 0,1,2 (3 seeds per learning rate)
 
-Seeds: 0,1,2,3,4 (5 seeds)
+To run the full sweep:
 
-Max steps: 50,000 for n=500, 100,000 for n=1000
-```
-
-Execute:
-
-```bash
+bash
 python experiments/sweep_runner.py
-```
+The script:
 
-On a single NVIDIA T4 GPU, the full sweep takes approximately 10‑12 hours. Results are saved incrementally to runs/master_results.csv. The sweep automatically resumes from where it left off if interrupted.
+Runs 15 configurations sequentially (5 LRs × 3 seeds).
 
-After the sweep completes, generate the paper’s figures:
+Saves results incrementally to runs/arrhenius_transformer_master.csv.
 
-```bash
-python analysis/fit_arrhenius.py        # Arrhenius plot (log τ vs 1/T_eff)
-python analysis/phase_diagram.py        # Heatmap of median grokking time
-Outputs are saved in the runs/ directory.
-```
+Automatically resumes if interrupted (e.g., after a Kaggle session limit).
 
-Individual Run Example
-To run a single experiment (e.g., modular addition with λ=1e-2, n=500, seed=0):
+After all runs finish, it performs a linear regression of 
+log
+⁡
+τ
+g
+r
+o
+k
+logτ 
+grok
+​
+  vs 
+1
+/
+T
+e
+f
+f
+1/T 
+eff
+​
+  and saves the Arrhenius plot as runs/arrhenius_transformer.png.
 
-```bash
-python run_experiment.py \
-    --task modular_add \
-    --model tiny_mlp \
-    --n 500 \
-    --batch 64 \
-    --wd 1e-2 \
-    --seed 0 \
-    --outdir runs/my_test \
-    --max_steps 50000 \
-    --log_interval 200 \
-    --grok_threshold 0.1
-All command‑line arguments are documented inside run_experiment.py.
-```
+Runtime: On a single NVIDIA T4 GPU, the full sweep takes approximately 12‑15 hours (depending on learning rates). With resume, you can run it over multiple sessions.
 
 Outputs and Metrics
 Each run produces:
 
 CSV log (log_seed{seed}.csv): columns – step, time, train_loss, C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, PR, T_eff_proxy.
 
-Geometry checkpoints (.npz files):
+Geometry checkpoints (.npz):
 
 geometry_pre.npz – at step 0.
 
-geometry_at.npz – the first time test_err < grok_threshold (if grokking occurs).
+geometry_at.npz – at the first step where test_err < 0.1.
 
 geometry_post.npz – at the end of training.
-Each checkpoint contains hess_top5 (list of top‑5 Hessian eigenvalues) and participation_ratio.
+
+The sweep script also produces arrhenius_transformer.png and a summary CSV with median grokking times.
 
 Reproducibility Guarantee
 All random seeds are fixed (torch.manual_seed, np.random.seed).
 
-The same train/test splits are used (full domain evaluation, no randomness in test set).
+The evaluation uses the full domain (no sampling noise).
 
-The code is deterministic (no operations with nondeterministic behaviour).
+The code is deterministic.
 
 The sweep runner saves intermediate results, allowing resumption after interruption.
 
 Customisation
-You can easily add new tasks by subclassing torch.utils.data.Dataset and extending make_dataloaders and the evaluation block in run_experiment.py. The order parameters and geometric diagnostics work for any classification task.
+You can modify hyperparameters directly in sweep_runner.py. To add a new task, extend run_experiment.py (datasets, evaluation) – the order parameters and geometric diagnostics work for any classification task.
 
 Citation
 If you use this code in your research, please cite the paper:
@@ -164,4 +160,4 @@ If you use this code in your research, please cite the paper:
 ```
 
 License
-MIT License – feel free to use and adapt for academic purposes.
+MIT License – free for academic use.
