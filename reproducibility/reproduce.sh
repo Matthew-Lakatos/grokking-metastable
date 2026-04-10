@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-set -e  # stop on first error
+set -e
 
-echo "=== Smoke test: modular addition ==="
+echo "=== Smoke test: modular addition (transformer) ==="
 python run_experiment.py \
     --task modular_add \
-    --model tiny_mlp \
-    --n 500 \
-    --batch 64 \
-    --wd 1e-5 \
+    --model tiny_transformer \
+    --n 4000 \
+    --batch 512 \
+    --wd 0.3 \
+    --lr 0.002 \
     --seed 0 \
-    --outdir runs/smoke_modular \
-    --max_steps 2000 \
-    --log_interval 100 \
+    --outdir runs/smoke_transformer \
+    --max_steps 20000 \
+    --log_interval 1000 \
     --grok_threshold 0.1
 
-echo "Smoke tests completed successfully."
+echo "Both smoke tests completed successfully."
