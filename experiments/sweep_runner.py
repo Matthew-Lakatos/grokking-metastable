@@ -32,7 +32,7 @@ n = 4000
 batch = 512
 wd = 0.3                # weight decay (fixed)
 grok_threshold = 0.1
-log_interval = 500      # uniform for all runs (finer than before)
+log_interval = 100      # uniform for all runs (must satisfy definition)
 seeds = [0, 1, 2]
 
 # Learning rates and their step budgets (conservative upper bounds)
