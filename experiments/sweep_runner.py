@@ -3,7 +3,7 @@
 # 
 # Vary learning rate, fix other hyperparameters.  
 # Runs 5 learning rates × 3 seeds = 15 runs.  
-# Estimated runtime: ~5‑8 hours (depending on lower LRs).  
+# Uses per‑LR max steps based on observed grokking times.  
 # Resumes automatically if interrupted.
 
 # %% [code]
@@ -27,17 +27,23 @@ os.chdir("grokking-metastable")
 task = "modular_add"
 model = "tiny_transformer"
 
-# Fixed hyperparameters (proven to grok for lr=0.002)
+# Fixed hyperparameters
 n = 4000
 batch = 512
 wd = 0.3                # weight decay (fixed)
-max_steps = 500000      # safe upper bound (lower LRs may need more steps)
-log_interval = 1000
 grok_threshold = 0.1
+log_interval = 500      # uniform for all runs (finer than before)
 seeds = [0, 1, 2]
 
-# Learning rates to sweep (covers ~2 orders of magnitude)
-learning_rates = [0.0005, 0.001, 0.002, 0.004, 0.008]
+# Learning rates and their step budgets (conservative upper bounds)
+lr_maxsteps = {
+    0.0005: 150000,
+    0.001:  100000,
+    0.002:   50000,
+    0.004:   50000,
+    0.008:   50000,
+}
+learning_rates = list(lr_maxsteps.keys())
 
 master_path = "runs/arrhenius_transformer_master.csv"
 
@@ -52,8 +58,11 @@ def is_run_complete(outdir, seed, max_steps):
         return False
     return True
 
-def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=1e-3, min_residence=100):
-    """Compute grokking time and effective temperature at transition."""
+def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=100):
+    """
+    Compute grokking time and effective temperature at transition.
+    Now uses train_loss_thresh = 0.1 (instead of 1e-3) to accommodate transformer.
+    """
     if not os.path.exists(csv_path):
         return np.nan, np.nan
     df = pd.read_csv(csv_path)
@@ -96,51 +105,53 @@ total = len(learning_rates) * len(seeds)
 run_idx = len(completed)
 start_time = time.time()
 
-for lr, seed in product(learning_rates, seeds):
-    if (lr, seed) in completed:
-        continue
-    run_idx += 1
-    outdir = f"runs/arrhenius_transformer/lr_{lr}_seed_{seed}"
-    os.makedirs(outdir, exist_ok=True)
+for lr in learning_rates:
+    max_steps = lr_maxsteps[lr]
+    for seed in seeds:
+        if (lr, seed) in completed:
+            continue
+        run_idx += 1
+        outdir = f"runs/arrhenius_transformer/lr_{lr}_seed_{seed}"
+        os.makedirs(outdir, exist_ok=True)
 
-    cmd = [
-        "python", "run_experiment.py",
-        "--task", task,
-        "--model", model,
-        "--n", str(n),
-        "--batch", str(batch),
-        "--wd", str(wd),
-        "--lr", str(lr),
-        "--seed", str(seed),
-        "--outdir", outdir,
-        "--max_steps", str(max_steps),
-        "--log_interval", str(log_interval),
-        "--grok_threshold", str(grok_threshold)
-    ]
-    print(f"[{run_idx}/{total}] lr={lr} seed={seed}")
-    start_run = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    elapsed_run = time.time() - start_run
+        cmd = [
+            "python", "run_experiment.py",
+            "--task", task,
+            "--model", model,
+            "--n", str(n),
+            "--batch", str(batch),
+            "--wd", str(wd),
+            "--lr", str(lr),
+            "--seed", str(seed),
+            "--outdir", outdir,
+            "--max_steps", str(max_steps),
+            "--log_interval", str(log_interval),
+            "--grok_threshold", str(grok_threshold)
+        ]
+        print(f"[{run_idx}/{total}] lr={lr} seed={seed} (max_steps={max_steps})")
+        start_run = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        elapsed_run = time.time() - start_run
 
-    if result.returncode != 0:
-        print(f"  Error: {result.stderr}")
-        tau, teff = np.nan, np.nan
-    else:
-        log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-        tau, teff = get_tau_grok_and_teff(log_path, grok_threshold)
-        print(f"  -> tau_grok = {tau}, T_eff = {teff:.3e} (time {elapsed_run/60:.1f} min)")
+        if result.returncode != 0:
+            print(f"  Error: {result.stderr}")
+            tau, teff = np.nan, np.nan
+        else:
+            log_path = os.path.join(outdir, f"log_seed{seed}.csv")
+            tau, teff = get_tau_grok_and_teff(log_path, grok_threshold)  # uses new threshold
+            print(f"  -> tau_grok = {tau}, T_eff = {teff:.3e} (time {elapsed_run/60:.1f} min)")
 
-    results.append({
-        'lr': lr,
-        'seed': seed,
-        'tau_grok': tau,
-        'T_eff_proxy': teff
-    })
-    pd.DataFrame(results).to_csv(master_path, index=False)
+        results.append({
+            'lr': lr,
+            'seed': seed,
+            'tau_grok': tau,
+            'T_eff_proxy': teff
+        })
+        pd.DataFrame(results).to_csv(master_path, index=False)
 
-    elapsed_total = time.time() - start_time
-    remaining = (total - run_idx) * (elapsed_total / run_idx) if run_idx > 0 else 0
-    print(f"  Total elapsed: {elapsed_total/3600:.2f}h, remaining: {remaining/3600:.2f}h")
+        elapsed_total = time.time() - start_time
+        remaining = (total - run_idx) * (elapsed_total / run_idx) if run_idx > 0 else 0
+        print(f"  Total elapsed: {elapsed_total/3600:.2f}h, remaining: {remaining/3600:.2f}h")
 
 print("\nAll runs completed. Results saved to", master_path)
 
