@@ -4,6 +4,7 @@
 # Vary learning rate, fix other hyperparameters.  
 # Runs 5 learning rates × 3 seeds = 15 runs.  
 # Uses per‑LR max steps based on observed grokking times.  
+# Log interval = 25 steps for high accuracy.  
 # Resumes automatically if interrupted.
 
 # %% [code]
@@ -32,7 +33,7 @@ n = 4000
 batch = 512
 wd = 0.3                # weight decay (fixed)
 grok_threshold = 0.1
-log_interval = 100      # uniform for all runs (must satisfy definition)
+log_interval = 25       # high accuracy (still satisfies 100‑step residence)
 seeds = [0, 1, 2]
 
 # Learning rates and their step budgets (conservative upper bounds)
@@ -61,30 +62,29 @@ def is_run_complete(outdir, seed, max_steps):
 def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=100):
     """
     Compute grokking time and effective temperature at transition.
-    Now uses train_loss_thresh = 0.1 (instead of 1e-3) to accommodate transformer.
     """
     if not os.path.exists(csv_path):
-        return np.nan, np.nan
+        return np.nan, np.nan, None
     df = pd.read_csv(csv_path)
     if 'T_eff_proxy' not in df.columns or 'train_loss' not in df.columns:
-        return np.nan, np.nan
+        return np.nan, np.nan, None
     grok_mask = df['test_err'] < grok_threshold
     if not grok_mask.any():
-        return np.nan, np.nan
+        return np.nan, np.nan, None
     first_grok = df[grok_mask]['step'].iloc[0]
     df_before = df[df['step'] <= first_grok]
     low_loss_mask = df_before['train_loss'] < train_loss_thresh
     if not low_loss_mask.any():
-        return np.nan, np.nan
+        return np.nan, np.nan, None
     t0 = df_before[low_loss_mask]['step'].iloc[0]
     if first_grok - t0 < min_residence:
-        return np.nan, np.nan
+        return np.nan, np.nan, None
     teff_row = df[df['step'] == first_grok]
     if teff_row.empty:
         teff = df_before['T_eff_proxy'].median()
     else:
         teff = teff_row['T_eff_proxy'].iloc[0]
-    return first_grok, teff
+    return first_grok, teff, df
 
 # ------------------------------------------------------------
 # 4. Run sweep
@@ -135,11 +135,19 @@ for lr in learning_rates:
 
         if result.returncode != 0:
             print(f"  Error: {result.stderr}")
-            tau, teff = np.nan, np.nan
+            tau, teff, df = np.nan, np.nan, None
         else:
             log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-            tau, teff = get_tau_grok_and_teff(log_path, grok_threshold)  # uses new threshold
+            tau, teff, df = get_tau_grok_and_teff(log_path, grok_threshold)
             print(f"  -> tau_grok = {tau}, T_eff = {teff:.3e} (time {elapsed_run/60:.1f} min)")
+
+            # Verification checks
+            if df is not None:
+                min_test_err = df['test_err'].min()
+                non_zero_teff = (df['T_eff_proxy'] > 0).any()
+                print(f"     [Verification] min test error = {min_test_err:.4f}, T_eff non‑zero = {non_zero_teff}")
+                if min_test_err < grok_threshold and np.isnan(tau):
+                    print(f"     [WARNING] test error dropped but residence condition failed (train loss never low enough?)")
 
         results.append({
             'lr': lr,
