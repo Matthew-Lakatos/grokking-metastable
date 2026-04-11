@@ -6,8 +6,8 @@ n: 4000
 batch_size: 512
 lr: 0.002
 weight_decay: 0.3
-max_steps: 500000
-log_interval: 1000
+max_steps: 150000
+log_interval: 250
 seed: 0
 emb: 32
 nhead: 2
