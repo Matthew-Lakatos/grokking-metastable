@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Path to a log from a successful run (adjust path as needed)
-log_path = "/kaggle/input/notebooks/matlak/lets-goo/grokking-metastable/runs/arrhenius_transformer/lr_0.002_seed_0/log_seed0.csv"
+log_path = "/grokking-metastable/runs/arrhenius_transformer/lr_0.002_seed_0/log_seed0.csv"
 df = pd.read_csv(log_path)
 
 grok_threshold = 0.1
