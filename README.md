@@ -39,7 +39,9 @@ grokking-metastable/
 ├── analysis/                  # Optional post‑processing scripts (not required)
 │   ├── fit_arrhenius.py
 │   └── phase_diagram.py
-└── runs/                      # Created at runtime – logs, checkpoints, results
+├── runs/                      # Created at runtime – logs, checkpoints, results
+└── diagnostics/
+    └── ...                    # Created to verify experimental findings
 ```
 
 Requirements
@@ -171,7 +173,7 @@ If you use this code in your research, please cite the paper:
 @article{lakatos2026grokking,
   title={Grokking as Metastable Complexity Dynamics},
   author={Lakatos, Matthew},
-  journal={Transactions on Machine Learning Research},
+  journal={ ... },
   year={2026}
 }
 ```
