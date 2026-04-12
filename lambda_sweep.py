@@ -76,22 +76,36 @@ for wd, seed in product(lambdas, seeds):
     results.append({'wd': wd, 'seed': seed, 'tau_grok': tau})
     pd.DataFrame(results).to_csv(master_path, index=False)
 
-# Summary
-df = pd.read_csv(master_path)
-summary = df.groupby('wd').agg(
-    median_tau=('tau_grok', 'median'),
-    grokked_ratio=('tau_grok', lambda x: (~np.isnan(x)).mean())
-).reset_index()
-print("\n=== Lambda sweep summary ===")
-print(summary)
-summary.to_csv('runs/lambda_summary.csv', index=False)
+# Path to the CSV file (adjust if needed)
+csv_path = "runs/lambda_sweep_master.csv"
 
-# Plot
+# Load data
+df = pd.read_csv(csv_path)
+
+# Remove any rows with NaN (if some λ didn't grok)
+df = df[df['tau_grok'].notna()]
+
+# Compute median, Q1, Q3 per λ
+summary = df.groupby('wd')['tau_grok'].agg(
+    median='median',
+    q25=lambda x: x.quantile(0.25),
+    q75=lambda x: x.quantile(0.75)
+).reset_index()
+summary['yerr_low'] = summary['median'] - summary['q25']
+summary['yerr_high'] = summary['q75'] - summary['median']
+
+# Semi‑log plot
 plt.figure(figsize=(6,5))
-plt.errorbar(summary['wd'], summary['median_tau'], fmt='o-')
+plt.errorbar(summary['wd'], summary['median'],
+             yerr=[summary['yerr_low'], summary['yerr_high']],
+             fmt='o-', capsize=5, capthick=1, elinewidth=1,
+             label='Median τ (IQR error bars)')
+plt.yscale('log')
 plt.xlabel('Weight decay λ')
-plt.ylabel('Median grokking time τ')
-plt.title('Regularisation effect on grokking time')
-plt.grid(True)
-plt.savefig('runs/lambda_effect.png', dpi=150)
+plt.ylabel('Median grokking time τ (steps)')
+plt.title('Regularisation effect on grokking time (semi‑log)')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.savefig('lambda_effect.png', dpi=150)
 plt.show()
