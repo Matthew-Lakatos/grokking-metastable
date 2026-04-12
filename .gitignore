@@ -11,12 +11,13 @@ venv/
 env/
 ENV/
 
-# Logs and data
+# Raw experiment outputs (large logs, checkpoints)
 runs/
 *.log
 *.npz
 *.tar.gz
-*.csv
+
+# Note: *.csv files are not ignored – commit final CSVs (e.g., data/*.csv)
 
 # IDE
 .vscode/
