@@ -5,6 +5,7 @@ set -e
 echo "Starting full sweep..."
 python experiments/sweep_runner.py
 python lambda_sweep.py
+python causal_test.py
 
 echo "Generating phase diagrams..."
 python analysis/phase_diagram.py
