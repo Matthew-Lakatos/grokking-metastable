@@ -15,4 +15,4 @@ python run_experiment.py \
     --log_interval 1000 \
     --grok_threshold 0.1
 
-echo "Both smoke tests completed successfully."
+echo "Smoke test successful"
