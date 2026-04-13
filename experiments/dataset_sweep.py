@@ -1,8 +1,11 @@
 # %% [markdown]
-# # Dataset Size Sweep (Prediction 5)
+# # Dataset Size Sweep (Prediction 5) – Full Grid
 # 
-# Tests the effect of training set size on grokking time.
-# n = 2000, 4000, 6000, 8000, seeds = 0,1,2.
+# - n from 2000 to 8000 step 500 (13 values)
+# - 3 seeds (0,1,2)
+# - max_steps = 100,000
+# - log_interval = 25
+# - Resumes automatically
 
 # %% [code]
 import os, subprocess, time
@@ -20,14 +23,13 @@ model = "tiny_transformer"
 batch = 512
 wd = 0.3
 lr = 0.002
-max_steps = 50000
+max_steps = 100000          # increased to allow grokking for larger n
 log_interval = 25
 grok_threshold = 0.1
-ns = [2000, 4000, 6000, 8000]
+ns = list(range(2000, 8500, 500))   # 2000,2500,...,8000
 seeds = [0, 1, 2]
 
 def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=25):
-    """Compute grokking time using residence condition."""
     if not os.path.exists(csv_path):
         return np.nan
     df = pd.read_csv(csv_path)
@@ -44,11 +46,23 @@ def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_reside
         return np.nan
     return first_grok
 
+# Load existing results to resume
 results = []
+completed = set()
+results_file = "dataset_sweep_results.csv"
+if os.path.exists(results_file):
+    existing = pd.read_csv(results_file)
+    for _, row in existing.iterrows():
+        completed.add((row['n'], row['seed']))
+    results = existing.to_dict('records')
+    print(f"Resuming: {len(completed)} runs already completed.")
+
 total = len(ns) * len(seeds)
-run_idx = 0
+run_idx = len(completed)
 
 for n, seed in product(ns, seeds):
+    if (n, seed) in completed:
+        continue
     run_idx += 1
     outdir = f"runs/dataset_sweep/n_{n}_seed_{seed}"
     os.makedirs(outdir, exist_ok=True)
@@ -69,25 +83,30 @@ for n, seed in product(ns, seeds):
     results.append({'n': n, 'seed': seed, 'tau_grok': tau})
     print(f"  -> tau_grok = {tau} (time {elapsed/60:.1f} min)")
 
-# Save raw data
-df_results = pd.DataFrame(results)
-df_results.to_csv("dataset_sweep_results.csv", index=False)
-print("\nRaw results saved to dataset_sweep_results.csv")
+    # Save incrementally
+    pd.DataFrame(results).to_csv(results_file, index=False)
 
-# Summary and plot
-summary = df_results.groupby('n').agg(
+# Final summary
+df_res = pd.DataFrame(results)
+df_res.to_csv(results_file, index=False)
+
+# Compute median and IQR per n
+summary = df_res.groupby('n').agg(
     median_tau=('tau_grok', 'median'),
-    std_tau=('tau_grok', 'std')
+    q25=('tau_grok', lambda x: x.quantile(0.25)),
+    q75=('tau_grok', lambda x: x.quantile(0.75))
 ).reset_index()
+summary['yerr_low'] = summary['median_tau'] - summary['q25']
+summary['yerr_high'] = summary['q75'] - summary['median_tau']
 
-plt.figure(figsize=(6,5))
-plt.errorbar(summary['n'], summary['median_tau'], yerr=summary['std_tau'],
+plt.figure(figsize=(8,5))
+plt.errorbar(summary['n'], summary['median_tau'], 
+             yerr=[summary['yerr_low'], summary['yerr_high']],
              fmt='o-', capsize=5, capthick=1, elinewidth=1)
 plt.xlabel('Training set size n')
 plt.ylabel('Grokking time τ (steps)')
-plt.title('Effect of dataset size on grokking time')
+plt.title('Effect of dataset size on grokking time (median ± IQR, 3 seeds)')
 plt.grid(True, alpha=0.3)
 plt.savefig('dataset_size_effect.png', dpi=150)
 plt.show()
-
-print("\nPlot saved as dataset_size_effect.png")
+print("Plot saved as dataset_size_effect.png")
