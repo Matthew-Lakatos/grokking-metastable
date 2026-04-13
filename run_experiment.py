@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-run_experiment.py – Final working version with AdamW.
-Supports modular addition (MLP with one-hot encoding or transformer with raw integers)
-and sparse parity (MLP only).
+run_experiment.py – Final version with resume support for learning rate switch experiments.
 """
 
 import argparse
@@ -80,10 +78,9 @@ class TinyTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=nlayers)
         self.pool = nn.Linear(emb, num_classes if num_classes is not None else vocab_size)
     def forward(self, x):
-        # x: (batch, seq_len) of token indices (long)
-        e = self.emb(x)                     # (batch, seq_len, emb)
-        h = self.encoder(e)                 # (batch, seq_len, emb)
-        h = h.mean(dim=1)                   # (batch, emb)
+        e = self.emb(x)
+        h = self.encoder(e)
+        h = h.mean(dim=1)
         return self.pool(h)
 
 # ---------- Utilities ----------
@@ -118,11 +115,6 @@ def canonical_sparse_parity_logits(X, active_bits=3):
     return F.one_hot(y, num_classes=2).float()
 
 def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_size, task, num_classes_mod=128):
-    """
-    FlucDis‑SGD using two *different* mini‑batches.
-    For modular addition, the batches are raw integers; we one‑hot encode them for MLP,
-    but for transformer we pass raw integers.
-    """
     x1, y1 = batch1
     x2, y2 = batch2
     x1, y1 = x1.to(device), y1.to(device)
@@ -130,23 +122,21 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
 
     if task == "modular_add":
         if isinstance(model, TinyMLP):
-            # One‑hot encode for MLP
             a1 = F.one_hot(x1[:, 0], num_classes=num_classes_mod)
             b1 = F.one_hot(x1[:, 1], num_classes=num_classes_mod)
             x1_enc = torch.cat([a1, b1], dim=1).float()
             a2 = F.one_hot(x2[:, 0], num_classes=num_classes_mod)
             b2 = F.one_hot(x2[:, 1], num_classes=num_classes_mod)
             x2_enc = torch.cat([a2, b2], dim=1).float()
-        else:  # transformer
+        else:
             x1_enc = x1
             x2_enc = x2
-    else:  # sparse_parity
+    else:
         x1_enc = x1
         x2_enc = x2
 
-    # Replica 1
     rep1 = copy.deepcopy(model)
-    rep1.to(device)               # move to the same device
+    rep1.to(device)
     rep1.train()
     rep1.zero_grad()
     logits1 = rep1(x1_enc)
@@ -154,9 +144,8 @@ def compute_teff_flucdis(model, criterion, batch1, batch2, device, lr, batch_siz
     loss1.backward()
     grad1 = torch.cat([p.grad.detach().view(-1) for p in rep1.parameters()])
 
-    # Replica 2
     rep2 = copy.deepcopy(model)
-    rep2.to(device)               # move to the same device
+    rep2.to(device)
     rep2.train()
     rep2.zero_grad()
     logits2 = rep2(x2_enc)
@@ -192,32 +181,28 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.outdir, exist_ok=True)
     csv_path = os.path.join(args.outdir, f"log_seed{args.seed}.csv")
+    checkpoint_path = os.path.join(args.outdir, "checkpoint.pt")
 
-    # Build data loaders
     train_loader, train_ds = make_dataloaders(args.task, args.n, args.batch, active_bits=args.active_bits)
 
-    # Build evaluation sets and model dimensions
     if args.task == "modular_add":
         full_ds = ModularAdditionDataset(n_bits=7, n_samples=None)
         X_list = np.array([x for x, _ in full_ds], dtype=np.int64)
         Y_list = np.array([y for _, y in full_ds], dtype=np.int64)
-        X_eval_raw = torch.from_numpy(X_list)   # shape (16384, 2)
+        X_eval_raw = torch.from_numpy(X_list)
         Y_eval = torch.from_numpy(Y_list)
-        # For MLP: one‑hot encode
         a_eval = F.one_hot(X_eval_raw[:, 0], num_classes=128)
         b_eval = F.one_hot(X_eval_raw[:, 1], num_classes=128)
-        X_eval_mlp = torch.cat([a_eval, b_eval], dim=1).float()   # (16384, 256)
-        # For transformer: raw integers
+        X_eval_mlp = torch.cat([a_eval, b_eval], dim=1).float()
         X_eval_transformer = X_eval_raw
         canonical_logits = F.one_hot(Y_eval, num_classes=2**7).float()
         num_classes = 2**7
-        # Set X_eval based on model type
         if args.model == "tiny_mlp":
             X_eval = X_eval_mlp
             input_dim = 256
         else:
             X_eval = X_eval_transformer
-            input_dim = 2   # not used for transformer, but needed for MLP branch
+            input_dim = 2
     elif args.task == "sparse_parity":
         active_bits = args.active_bits
         total_bits = 16
@@ -230,7 +215,6 @@ def train(args):
     else:
         raise ValueError("Unknown task")
 
-    # Build model
     if args.model == "tiny_mlp":
         model = TinyMLP(input_dim=input_dim, hidden=args.hidden, num_classes=num_classes)
     elif args.model == "tiny_transformer":
@@ -242,54 +226,65 @@ def train(args):
         raise ValueError("Unknown model")
     model.to(device)
 
-    # ---------- CRITICAL CHANGE: Use AdamW instead of Adam ----------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
-    # ----------------------------------------------------------------
+    start_step = 0
+    if args.resume:
+        if os.path.exists(args.resume_from):
+            checkpoint = torch.load(args.resume_from, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_step = checkpoint['step']
+            print(f"Resumed from {args.resume_from} at step {start_step}")
+        else:
+            print(f"Checkpoint {args.resume_from} not found. Starting from scratch.")
 
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     criterion = nn.CrossEntropyLoss()
 
     header = ["step","time","train_loss","C_norm","C_PB","m","q_logit","q_ent","test_err","hess_top","PR","T_eff_proxy"]
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
+    if not args.resume or not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+    else:
+        # CSV exists, we will append
+        pass
 
-    step = 0
+    step = start_step
     start_time = time.time()
     has_grokked = False
 
-    # Initial logging (step 0)
-    model.eval()
-    with torch.no_grad():
-        C_norm = compute_C_norm(model)
-        C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
-        logits_eval = []
-        bs = 256
-        for i in range(0, len(X_eval), bs):
-            xbatch = X_eval[i:i+bs].to(device)
-            logits = model(xbatch)
-            logits_eval.append(logits.cpu())
-        logits_eval = torch.cat(logits_eval, dim=0)
-        m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
-        q_logit, q_ent = compute_precision(logits_eval)
-        test_err = evaluate_test_error(model, X_eval, Y_eval)
-        try:
-            hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
-            hess_top = hess_top5[0]
-        except Exception:
-            hess_top = float('nan')
-        try:
-            pr = participation_ratio_from_model(model, X_eval[:512].to(device))
-        except Exception:
-            pr = float('nan')
-        T_eff_proxy = 0.0
-        elapsed = time.time() - start_time
-        row = [step, f"{elapsed:.1f}", float('nan'), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
-        with open(csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(row)
-        print(f"[step {step}] test_err={test_err:.3f} (initial)")
+    if step == 0:
+        model.eval()
+        with torch.no_grad():
+            C_norm = compute_C_norm(model)
+            C_PB = compute_C_PB(model, sigma_p=args.sigma_p, sigma_q=args.sigma_q)
+            logits_eval = []
+            bs = 256
+            for i in range(0, len(X_eval), bs):
+                xbatch = X_eval[i:i+bs].to(device)
+                logits = model(xbatch)
+                logits_eval.append(logits.cpu())
+            logits_eval = torch.cat(logits_eval, dim=0)
+            m = compute_alignment(logits_eval, canonical_logits) if canonical_logits is not None else 0.0
+            q_logit, q_ent = compute_precision(logits_eval)
+            test_err = evaluate_test_error(model, X_eval, Y_eval)
+            try:
+                hess_top5 = lanczos_top_k(model, criterion, X_eval[:256].to(device), Y_eval[:256].to(device), k=5)
+                hess_top = hess_top5[0]
+            except Exception:
+                hess_top = float('nan')
+            try:
+                pr = participation_ratio_from_model(model, X_eval[:512].to(device))
+            except Exception:
+                pr = float('nan')
+            T_eff_proxy = 0.0
+            elapsed = time.time() - start_time
+            row = [step, f"{elapsed:.1f}", float('nan'), C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, pr, T_eff_proxy]
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+            print(f"[step {step}] test_err={test_err:.3f} (initial)")
 
-    save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'pre')
+        save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'pre')
 
     data_iter = iter(train_loader)
     while step < args.max_steps:
@@ -301,14 +296,13 @@ def train(args):
                 xs = xs.to(device)
                 ys = ys.to(device)
                 if args.model == "tiny_mlp":
-                    # One‑hot encode training batch
                     a = F.one_hot(xs[:, 0], num_classes=128)
                     b = F.one_hot(xs[:, 1], num_classes=128)
                     inp = torch.cat([a, b], dim=1).float()
                     logits = model(inp)
-                else:  # transformer
+                else:
                     logits = model(xs)
-            else:  # sparse_parity
+            else:
                 xs, ys = batch
                 xs = xs.to(device)
                 ys = ys.to(device)
@@ -319,7 +313,6 @@ def train(args):
             step += 1
 
             if step % args.log_interval == 0:
-                # Get a second batch for FlucDis
                 try:
                     batch2 = next(data_iter)
                 except StopIteration:
@@ -365,7 +358,12 @@ def train(args):
                 break
 
     save_geometry_checkpoint(model, criterion, X_eval, Y_eval, device, args.outdir, 'post')
-    print("Training finished. Logs saved to", csv_path)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'step': step,
+    }, checkpoint_path)
+    print(f"Training finished. Logs saved to {csv_path}, checkpoint saved to {checkpoint_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -385,6 +383,8 @@ if __name__ == "__main__":
     parser.add_argument("--outdir", type=str, default="runs")
     parser.add_argument("--grok_threshold", type=float, default=0.1)
     parser.add_argument("--active_bits", type=int, default=3, help="Active bits for sparse parity")
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
+    parser.add_argument("--resume_from", type=str, default="checkpoint.pt", help="Checkpoint file to resume from")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
