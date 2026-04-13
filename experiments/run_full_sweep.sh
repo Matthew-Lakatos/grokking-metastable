@@ -6,6 +6,7 @@ echo "Starting full sweep..."
 python experiments/sweep_runner.py
 python lambda_sweep.py
 python causal_test.py
+python dataset_sweep.py
 
 echo "Generating phase diagrams..."
 python analysis/phase_diagram.py
