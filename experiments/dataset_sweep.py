@@ -1,11 +1,9 @@
 # %% [markdown]
-# # Dataset Size Sweep (Prediction 5) – Full Grid
-# 
-# - n from 2000 to 8000 step 500 (13 values)
-# - 3 seeds (0,1,2)
-# - max_steps = 100,000
+# # Dataset Size Sweep (Sparser Grid, Resume)
+# - n = 2000,3000,4000,5000,6000,7000,8000
+# - 3 seeds
+# - max_steps = 100000
 # - log_interval = 25
-# - Resumes automatically
 
 # %% [code]
 import os, subprocess, time
@@ -23,10 +21,10 @@ model = "tiny_transformer"
 batch = 512
 wd = 0.3
 lr = 0.002
-max_steps = 100000          # increased to allow grokking for larger n
+max_steps = 100000
 log_interval = 25
 grok_threshold = 0.1
-ns = list(range(2000, 8500, 500))   # 2000,2500,...,8000
+ns = [2000, 3000, 4000, 5000, 6000, 7000, 8000]   # sparser grid
 seeds = [0, 1, 2]
 
 def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=25):
@@ -46,7 +44,7 @@ def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_reside
         return np.nan
     return first_grok
 
-# Load existing results to resume
+# Load existing results
 results = []
 completed = set()
 results_file = "dataset_sweep_results.csv"
@@ -86,11 +84,8 @@ for n, seed in product(ns, seeds):
     # Save incrementally
     pd.DataFrame(results).to_csv(results_file, index=False)
 
-# Final summary
-df_res = pd.DataFrame(results)
-df_res.to_csv(results_file, index=False)
-
-# Compute median and IQR per n
+# Summary and plot
+df_res = pd.read_csv(results_file)
 summary = df_res.groupby('n').agg(
     median_tau=('tau_grok', 'median'),
     q25=('tau_grok', lambda x: x.quantile(0.25)),
