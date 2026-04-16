@@ -24,7 +24,7 @@ lr = 0.002
 max_steps = 100000
 log_interval = 25
 grok_threshold = 0.1
-ns = [2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000, 7500, 8000]   # grid
+ns = [2000, 3000, 4000, 5000, 6000, 7000, 8000]   # grid
 seeds = [0, 1, 2]
 
 def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=25):
