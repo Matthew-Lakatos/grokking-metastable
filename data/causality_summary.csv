@@ -1,0 +1,10 @@
+condition,seed,tau_grok
+constant_low,0,50925
+constant_low,1,46050
+constant_low,2,31350
+constant_high,0,8050
+constant_high,1,5425
+constant_high,2,4500
+low2high,0,40875
+low2high,1,40450
+low2high,2,31350
