@@ -1,0 +1,16 @@
+sweep,param,seed,tau_grok
+arrhenius,0.002,1,5425
+arrhenius,0.0005,1,17750
+arrhenius,0.008,0,1525
+arrhenius,0.008,1,1600
+arrhenius,0.0005,2,12275
+arrhenius,0.001,0,12350
+arrhenius,0.001,1,7500
+arrhenius,0.004,0,2850
+arrhenius,0.002,2,4500
+arrhenius,0.0005,0,23075
+arrhenius,0.002,0,8050
+arrhenius,0.001,2,8175
+arrhenius,0.004,1,3350
+arrhenius,0.008,2,2025
+arrhenius,0.004,2,2975

@@ -1,0 +1,13 @@
+sweep,param,seed,tau_grok
+lambda,0.2,1,8100
+lambda,0.4,1,4200
+lambda,0.2,0,8300
+lambda,0.3,2,5300
+lambda,0.1,1,13000
+lambda,0.4,0,4500
+lambda,0.3,0,5900
+lambda,0.2,2,7200
+lambda,0.1,2,11500
+lambda,0.1,0,14800
+lambda,0.3,1,5600
+lambda,0.4,2,4100
