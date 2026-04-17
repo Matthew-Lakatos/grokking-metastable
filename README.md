@@ -40,8 +40,8 @@ grokking-metastable/
 │   ├── fit_arrhenius.py
 │   └── phase_diagram.py
 ├── runs/                      # Created at runtime – logs, checkpoints, results
-└── diagnostics/
-    └── ...                    # Created to verify experimental findings
+└── final_output/
+    └── ...                    # Created at runtime - hosts the end results, figures and all data, ensures correctness
 ```
 
 Requirements
