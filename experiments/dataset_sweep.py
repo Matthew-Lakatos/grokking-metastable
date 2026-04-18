@@ -84,7 +84,7 @@ for n, seed in product(ns, seeds):
     # Save incrementally
     pd.DataFrame(results).to_csv(results_file, index=False)
 
-# Summary and plot
+# Summary
 df_res = pd.read_csv(results_file)
 summary = df_res.groupby('n').agg(
     median_tau=('tau_grok', 'median'),
@@ -94,14 +94,4 @@ summary = df_res.groupby('n').agg(
 summary['yerr_low'] = summary['median_tau'] - summary['q25']
 summary['yerr_high'] = summary['q75'] - summary['median_tau']
 
-plt.figure(figsize=(8,5))
-plt.errorbar(summary['n'], summary['median_tau'], 
-             yerr=[summary['yerr_low'], summary['yerr_high']],
-             fmt='o-', capsize=5, capthick=1, elinewidth=1)
-plt.xlabel('Training set size n')
-plt.ylabel('Grokking time τ (steps)')
-plt.title('Effect of dataset size on grokking time (median ± IQR, 3 seeds)')
-plt.grid(True, alpha=0.3)
-plt.savefig('dataset_size_effect.png', dpi=150)
-plt.show()
-print("Plot saved as dataset_size_effect.png")
+
