@@ -1,6 +1,5 @@
 # %% [markdown]
 # # Lambda sweep for modular addition (transformer) – test regularisation effect
-# # Runnable as is
 
 # %% [code]
 import os, subprocess, time
@@ -93,19 +92,3 @@ summary = df.groupby('wd')['tau_grok'].agg(
 ).reset_index()
 summary['yerr_low'] = summary['median'] - summary['q25']
 summary['yerr_high'] = summary['q75'] - summary['median']
-
-# Semi‑log plot
-plt.figure(figsize=(6,5))
-plt.errorbar(summary['wd'], summary['median'],
-             yerr=[summary['yerr_low'], summary['yerr_high']],
-             fmt='o-', capsize=5, capthick=1, elinewidth=1,
-             label='Median τ (IQR error bars)')
-plt.yscale('log')
-plt.xlabel('Weight decay λ')
-plt.ylabel('Median grokking time τ (steps)')
-plt.title('Regularisation effect on grokking time (semi‑log)')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-plt.savefig('lambda_effect.png', dpi=150)
-plt.show()
