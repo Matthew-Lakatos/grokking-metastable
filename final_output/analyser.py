@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Re‑analyse All Sweeps with Corrected Grokking Detection
+# # analyse All Sweeps with Corrected Grokking Detection
 # 
 # - train_loss_thresh = 0.5
 # - min_stable = 5 (test error must stay below 0.1 for 5 consecutive logs)
@@ -76,7 +76,7 @@ else:
         print(f"{sweep} param={param} seed={seed} -> tau={tau}")
 
     df = pd.DataFrame(data)
-    df.to_csv("all_sweeps_reanalysed.csv", index=False)
+    df.to_csv("final_output/all_sweeps_reanalysed.csv", index=False)
 
     # Generate figures per sweep
     batch_size = 512
@@ -102,7 +102,7 @@ else:
             plt.title('Arrhenius scaling for modular addition (transformer)')
             plt.legend()
             plt.grid(True)
-            plt.savefig('arrhenius_corrected.png', dpi=150)
+            plt.savefig('final_output/arrhenius_corrected.png', dpi=150)
             plt.show()
         else:
             # Dataset or lambda sweep: errorbar plot (median ± IQR)
@@ -127,11 +127,11 @@ else:
             plt.ylabel('Grokking time τ (steps)')
             plt.title(title)
             plt.grid(True)
-            plt.savefig(f'{sweep}_sweep_corrected.png', dpi=150)
+            plt.savefig(f'final_output/{sweep}_sweep_corrected.png', dpi=150)
             plt.show()
 
     # Separate by sweep type into individual CSV files
     for sweep in df['sweep'].unique():
         subset = df[df['sweep'] == sweep]
-        subset.to_csv(f"{sweep}_corrected.csv", index=False)
+        subset.to_csv(f"final_output/{sweep}_corrected.csv", index=False)
         print(f"Saved {sweep}_corrected.csv with {len(subset)} rows")
