@@ -39,7 +39,7 @@ grokking-metastable/
 ├── analysis/                  # Optional post‑processing scripts (not required)
 │   ├── fit_arrhenius.py
 │   └── phase_diagram.py
-├── runs/                      # Created at runtime – intermediate step for output, please ignore figures and tau_grok here
+├── runs/                      # Created at runtime – IGNORE PLOTS AND TAU GROK - intermediate step for output
 └── final_output/
     └── ...                    # Created at runtime - hosts the end results, figures and all data, ensures correctness
 ```
