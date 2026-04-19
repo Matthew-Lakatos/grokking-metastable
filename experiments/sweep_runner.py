@@ -1,213 +1,266 @@
-# %% [markdown]
-# # Full Arrhenius Sweep – Modular Addition with Transformer
-# 
-# Vary learning rate, fix other hyperparameters.  
-# Runs 5 learning rates × 3 seeds = 15 runs.  
-# Uses per‑LR max steps based on observed grokking times.  
-# Log interval = 25 steps for high accuracy.  
-# Resumes automatically if interrupted.
+#!/usr/bin/env python3
+"""
+experiments/sweep_runner.py
+Arrhenius sweep: vary learning rate, hold all other hyperparameters fixed.
 
-# %% [code]
-import os, subprocess, time
-import pandas as pd
-import numpy as np
+Runs 5 learning rates × 3 seeds = 15 configurations sequentially.
+Results are saved incrementally to ``runs/arrhenius_transformer_master.csv``
+and the script resumes automatically if interrupted.
+
+After all runs finish a quick diagnostic Arrhenius fit (log τ vs T_eff_proxy)
+is printed and saved to ``runs/arrhenius_transformer_diagnostic.png``.
+The paper-quality figure is produced by ``final_output/analyser.py``.
+
+Run from the repository root:
+    python experiments/sweep_runner.py
+"""
+
+import os
+import subprocess
+import tarfile
+import time
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from scipy import stats
-from itertools import product
 
-# ------------------------------------------------------------
-# 1. Setup repository (clone if not present)
-# ------------------------------------------------------------
-if not os.path.exists("grokking-metastable"):
-    !git clone https://github.com/Matthew-Lakatos/grokking-metastable.git
-os.chdir("grokking-metastable")
+from diagnostics.order_params import get_tau_grok
 
-# ------------------------------------------------------------
-# 2. Experiment configuration
-# ------------------------------------------------------------
-task = "modular_add"
-model = "tiny_transformer"
+# ---------------------------------------------------------------------------
+# Sweep configuration
+# ---------------------------------------------------------------------------
+TASK         = "modular_add"
+MODEL        = "tiny_transformer"
+N            = 4000
+BATCH        = 512
+WEIGHT_DECAY = 0.3
+GROK_THRESHOLD = 0.1
+LOG_INTERVAL = 25
+SEEDS        = [0, 1, 2]
 
-# Fixed hyperparameters
-n = 4000
-batch = 512
-wd = 0.3                # weight decay (fixed)
-grok_threshold = 0.1
-log_interval = 25       # high accuracy (still satisfies 100‑step residence)
-seeds = [0, 1, 2]
-
-# Learning rates and their step budgets (conservative upper bounds)
-lr_maxsteps = {
-    0.0005: 150000,
-    0.001:  100000,
-    0.002:   50000,
-    0.004:   50000,
-    0.008:   50000,
+# Per-learning-rate step budgets (conservative upper bounds).
+LR_MAXSTEPS = {
+    0.0005: 150_000,
+    0.001:  100_000,
+    0.002:   50_000,
+    0.004:   50_000,
+    0.008:   50_000,
 }
-learning_rates = list(lr_maxsteps.keys())
+LEARNING_RATES = list(LR_MAXSTEPS.keys())
 
-master_path = "runs/arrhenius_transformer_master.csv"
+MASTER_CSV = "runs/arrhenius_transformer_master.csv"
 
-# ------------------------------------------------------------
-# 3. Helper functions
-# ------------------------------------------------------------
-def is_run_complete(outdir, seed, max_steps):
-    """Check if a run completed successfully (final checkpoint exists)."""
-    post_path = os.path.join(outdir, f"geometry_post.npz")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def is_run_complete(outdir, seed):
+    """Return True if the run wrote both a log CSV and a post-geometry file."""
+    return (
+        os.path.exists(os.path.join(outdir, "geometry_post.npz")) and
+        os.path.exists(os.path.join(outdir, f"log_seed{seed}.csv"))
+    )
+
+
+def get_T_eff_at_grok(log_path, tau_grok_step):
+    """
+    Return the T_eff_proxy value at the grokking step.
+
+    Falls back to the median of the last 10 log entries before the
+    transition if the exact step is not present.
+    """
+    if np.isnan(tau_grok_step) or not os.path.exists(log_path):
+        return np.nan
+    df = pd.read_csv(log_path)
+    if 'T_eff_proxy' not in df.columns:
+        return np.nan
+    row = df[df['step'] == tau_grok_step]
+    if not row.empty:
+        return float(row['T_eff_proxy'].iloc[0])
+    before = df[df['step'] <= tau_grok_step]
+    if before.empty:
+        return np.nan
+    return float(before['T_eff_proxy'].iloc[-min(10, len(before)):].median())
+
+
+def run_single(lr, seed, outdir, max_steps):
+    """Launch run_experiment.py as a subprocess and return (tau_grok, T_eff)."""
+    cmd = [
+        "python", "run_experiment.py",
+        "--task",           TASK,
+        "--model",          MODEL,
+        "--n",              str(N),
+        "--batch",          str(BATCH),
+        "--wd",             str(WEIGHT_DECAY),
+        "--lr",             str(lr),
+        "--seed",           str(seed),
+        "--outdir",         outdir,
+        "--max_steps",      str(max_steps),
+        "--log_interval",   str(LOG_INTERVAL),
+        "--grok_threshold", str(GROK_THRESHOLD),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  [ERROR] {result.stderr.strip()}")
+        return np.nan, np.nan
+
     log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-    if not os.path.exists(post_path) or not os.path.exists(log_path):
-        return False
-    return True
+    tau = get_tau_grok(log_path, grok_threshold=GROK_THRESHOLD)
+    teff = get_T_eff_at_grok(log_path, tau)
+    return tau, teff
 
-def get_tau_grok_and_teff(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=100):
-    """
-    Compute grokking time and effective temperature at transition.
-    """
-    if not os.path.exists(csv_path):
-        return np.nan, np.nan, None
-    df = pd.read_csv(csv_path)
-    if 'T_eff_proxy' not in df.columns or 'train_loss' not in df.columns:
-        return np.nan, np.nan, None
-    grok_mask = df['test_err'] < grok_threshold
-    if not grok_mask.any():
-        return np.nan, np.nan, None
-    first_grok = df[grok_mask]['step'].iloc[0]
-    df_before = df[df['step'] <= first_grok]
-    low_loss_mask = df_before['train_loss'] < train_loss_thresh
-    if not low_loss_mask.any():
-        return np.nan, np.nan, None
-    t0 = df_before[low_loss_mask]['step'].iloc[0]
-    if first_grok - t0 < min_residence:
-        return np.nan, np.nan, None
-    teff_row = df[df['step'] == first_grok]
-    if teff_row.empty:
-        teff = df_before['T_eff_proxy'].median()
+
+# ---------------------------------------------------------------------------
+# Main sweep
+# ---------------------------------------------------------------------------
+
+def run_sweep():
+    os.makedirs("runs", exist_ok=True)
+
+    # Resume: load already-completed (lr, seed) pairs.
+    results = []
+    completed = set()
+    if os.path.exists(MASTER_CSV):
+        existing = pd.read_csv(MASTER_CSV)
+        for _, row in existing.iterrows():
+            completed.add((row['lr'], row['seed']))
+        results = existing.to_dict('records')
+        print(f"Resuming — {len(completed)} run(s) already completed.")
     else:
-        teff = teff_row['T_eff_proxy'].iloc[0]
-    return first_grok, teff, df
+        print("Starting new Arrhenius sweep.")
 
-# ------------------------------------------------------------
-# 4. Run sweep
-# ------------------------------------------------------------
-results = []
-completed = set()
+    total = len(LEARNING_RATES) * len(SEEDS)
+    run_idx = len(completed)
+    sweep_start = time.time()
 
-if os.path.exists(master_path):
-    existing = pd.read_csv(master_path)
-    for _, row in existing.iterrows():
-        completed.add((row['lr'], row['seed']))
-    results = existing.to_dict('records')
-    print(f"Resuming: {len(completed)} runs already completed.")
-else:
-    print("Starting new sweep.")
+    for lr in LEARNING_RATES:
+        max_steps = LR_MAXSTEPS[lr]
+        for seed in SEEDS:
+            if (lr, seed) in completed:
+                continue
 
-total = len(learning_rates) * len(seeds)
-run_idx = len(completed)
-start_time = time.time()
+            run_idx += 1
+            outdir = f"runs/arrhenius_transformer/lr_{lr}_seed_{seed}"
+            os.makedirs(outdir, exist_ok=True)
 
-for lr in learning_rates:
-    max_steps = lr_maxsteps[lr]
-    for seed in seeds:
-        if (lr, seed) in completed:
-            continue
-        run_idx += 1
-        outdir = f"runs/arrhenius_transformer/lr_{lr}_seed_{seed}"
-        os.makedirs(outdir, exist_ok=True)
+            print(f"\n[{run_idx}/{total}] lr={lr}  seed={seed}  "
+                  f"max_steps={max_steps:,}")
+            t0 = time.time()
 
-        cmd = [
-            "python", "run_experiment.py",
-            "--task", task,
-            "--model", model,
-            "--n", str(n),
-            "--batch", str(batch),
-            "--wd", str(wd),
-            "--lr", str(lr),
-            "--seed", str(seed),
-            "--outdir", outdir,
-            "--max_steps", str(max_steps),
-            "--log_interval", str(log_interval),
-            "--grok_threshold", str(grok_threshold)
-        ]
-        print(f"[{run_idx}/{total}] lr={lr} seed={seed} (max_steps={max_steps})")
-        start_run = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        elapsed_run = time.time() - start_run
+            if is_run_complete(outdir, seed):
+                log_path = os.path.join(outdir, f"log_seed{seed}.csv")
+                tau  = get_tau_grok(log_path, grok_threshold=GROK_THRESHOLD)
+                teff = get_T_eff_at_grok(log_path, tau)
+                print(f"  Already complete — tau_grok={tau}, T_eff={teff:.3e}")
+            else:
+                tau, teff = run_single(lr, seed, outdir, max_steps)
+                elapsed = time.time() - t0
+                teff_str = f"{teff:.3e}" if not np.isnan(teff) else "nan"
+                print(f"  tau_grok={tau}  T_eff={teff_str}  "
+                      f"({elapsed / 60:.1f} min)")
 
-        if result.returncode != 0:
-            print(f"  Error: {result.stderr}")
-            tau, teff, df = np.nan, np.nan, None
-        else:
-            log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-            tau, teff, df = get_tau_grok_and_teff(log_path, grok_threshold)
-            print(f"  -> tau_grok = {tau}, T_eff = {teff:.3e} (time {elapsed_run/60:.1f} min)")
+                # Verification.
+                log_path = os.path.join(outdir, f"log_seed{seed}.csv")
+                if os.path.exists(log_path):
+                    df = pd.read_csv(log_path)
+                    min_err = df['test_err'].min()
+                    has_teff = (df['T_eff_proxy'] > 0).any()
+                    print(f"  [check] min_test_err={min_err:.4f}  "
+                          f"T_eff_nonzero={has_teff}")
+                    if min_err < GROK_THRESHOLD and np.isnan(tau):
+                        print("  [WARNING] test_err dropped but grokking not "
+                              "detected — check stability/train_loss criteria.")
 
-            # Verification checks
-            if df is not None:
-                min_test_err = df['test_err'].min()
-                non_zero_teff = (df['T_eff_proxy'] > 0).any()
-                print(f"     [Verification] min test error = {min_test_err:.4f}, T_eff non‑zero = {non_zero_teff}")
-                if min_test_err < grok_threshold and np.isnan(tau):
-                    print(f"     [WARNING] test error dropped but residence condition failed (train loss never low enough?)")
+            results.append({'lr': lr, 'seed': seed,
+                            'tau_grok': tau, 'T_eff_proxy': teff})
+            pd.DataFrame(results).to_csv(MASTER_CSV, index=False)
 
-        results.append({
-            'lr': lr,
-            'seed': seed,
-            'tau_grok': tau,
-            'T_eff_proxy': teff
-        })
-        pd.DataFrame(results).to_csv(master_path, index=False)
+            total_elapsed = time.time() - sweep_start
+            eta = (total - run_idx) * (total_elapsed / run_idx) if run_idx > 0 else 0
+            print(f"  Elapsed: {total_elapsed / 3600:.2f} h  "
+                  f"ETA: {eta / 3600:.2f} h")
 
-        elapsed_total = time.time() - start_time
-        remaining = (total - run_idx) * (elapsed_total / run_idx) if run_idx > 0 else 0
-        print(f"  Total elapsed: {elapsed_total/3600:.2f}h, remaining: {remaining/3600:.2f}h")
+    print(f"\nAll runs complete. Results saved to {MASTER_CSV!r}.")
 
-print("\nAll runs completed. Results saved to", master_path)
 
-# ------------------------------------------------------------
-# 5. Arrhenius fit and plot
-# ------------------------------------------------------------
-df = pd.read_csv(master_path)
-valid = df[(df['tau_grok'].notna()) & (df['tau_grok'] > 0) & (df['T_eff_proxy'] > 0)]
+# ---------------------------------------------------------------------------
+# Diagnostic Arrhenius fit (uses T_eff_proxy from the log)
+# ---------------------------------------------------------------------------
 
-if len(valid) >= 5:
+def diagnostic_arrhenius_fit():
+    """
+    Quick Arrhenius fit using the FlucDis T_eff_proxy column.
+
+    This is a diagnostic check only.  The authoritative paper figure
+    (using B/lr as the temperature proxy) is produced by
+    final_output/analyser.py.
+    """
+    df = pd.read_csv(MASTER_CSV)
+    valid = df[df['tau_grok'].notna() & (df['tau_grok'] > 0) &
+               df['T_eff_proxy'].notna() & (df['T_eff_proxy'] > 0)].copy()
+
+    if len(valid) < 5:
+        print(f"Not enough valid runs for Arrhenius fit ({len(valid)} available).")
+        return
+
     valid['log_tau'] = np.log(valid['tau_grok'])
-    valid['inv_T'] = 1.0 / valid['T_eff_proxy']
-    slope, intercept, r_value, p_value, std_err = stats.linregress(valid['inv_T'], valid['log_tau'])
-    print("\n" + "="*50)
-    print("ARRHENIUS FIT RESULTS")
-    print("="*50)
-    print(f"log(tau) = {intercept:.4f} + {slope:.4f} * (1/T_eff)")
-    print(f"R² = {r_value**2:.4f}")
-    print(f"p-value = {p_value:.2e}")
-    print(f"Standard error = {std_err:.4f}")
+    valid['inv_T']   = 1.0 / valid['T_eff_proxy']
+    slope, intercept, r_value, p_value, std_err = stats.linregress(
+        valid['inv_T'], valid['log_tau']
+    )
 
-    # Plot
-    plt.figure(figsize=(6,5))
+    print("\n" + "=" * 50)
+    print("DIAGNOSTIC ARRHENIUS FIT (T_eff_proxy from FlucDis)")
+    print("=" * 50)
+    print(f"log(τ) = {intercept:.4f} + {slope:.4f} × (1/T_eff)")
+    print(f"R²={r_value ** 2:.4f}  p={p_value:.2e}  se={std_err:.4f}")
+
+    plt.figure(figsize=(6, 5))
     plt.scatter(valid['inv_T'], valid['log_tau'], alpha=0.6, label='Data')
     x_line = np.linspace(valid['inv_T'].min(), valid['inv_T'].max(), 100)
-    plt.plot(x_line, intercept + slope * x_line, 'r-', label=f'fit: slope={slope:.3f}')
-    plt.xlabel('1 / T_eff (from FlucDis)')
-    plt.ylabel('log(tau_grok)')
-    plt.title('Arrhenius scaling – Modular addition (transformer)')
+    plt.plot(x_line, intercept + slope * x_line, 'r-',
+             label=f'fit: slope={slope:.3f}')
+    plt.xlabel('1 / T_eff (FlucDis)')
+    plt.ylabel('log(τ_grok)')
+    plt.title('Diagnostic Arrhenius — modular addition (transformer)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('runs/arrhenius_transformer.png', dpi=150)
-    plt.show()
-else:
-    print(f"Not enough valid runs (got {len(valid)}). Please check logs.")
+    out_path = "runs/arrhenius_transformer_diagnostic.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Diagnostic plot saved to {out_path!r}.")
 
-# ------------------------------------------------------------
-# 6. Save summary
-# ------------------------------------------------------------
-summary = df.groupby('lr').agg(
-    median_tau=('tau_grok', 'median'),
-    grokked_ratio=('tau_grok', lambda x: (~np.isnan(x)).mean())
-).reset_index()
-summary.to_csv('runs/arrhenius_summary.csv', index=False)
-print("\nSummary statistics saved to runs/arrhenius_summary.csv")
-print(summary)
+    # Summary by lr.
+    summary = df.groupby('lr').agg(
+        median_tau=('tau_grok', 'median'),
+        grokked_ratio=('tau_grok', lambda x: (~np.isnan(x)).mean()),
+    ).reset_index()
+    summary_path = "runs/arrhenius_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    print(f"Summary statistics saved to {summary_path!r}.")
+    print(summary.to_string(index=False))
 
-# Archive results
-!tar -czf runs_archive.tar.gz runs/
-print("All results archived to runs_archive.tar.gz")
+
+# ---------------------------------------------------------------------------
+# Archive
+# ---------------------------------------------------------------------------
+
+def archive_runs():
+    """Compress the runs/ directory into runs_archive.tar.gz."""
+    archive_path = "runs_archive.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add("runs")
+    print(f"Results archived to {archive_path!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    run_sweep()
+    diagnostic_arrhenius_fit()
+    archive_runs()
