@@ -1,56 +1,73 @@
 # Grokking as Metastable Complexity Dynamics
 
 **Author:** Matthew Lakatos  
-**Contact:** m.atthew.lakatos1@gmail.com  
-**Special Thanks:** Deepseek AI for writing the README.md and code documentation
+**Contact:** m.atthew.lakatos1@gmail.com
 
 ## Overview
 
-This repository contains the complete code and analysis for the paper  
-*“Grokking as Metastable Complexity Dynamics”*. Grokking – the phenomenon where a model suddenly generalises long after memorising the training data – is formalised as a metastable escape in a complexity‑regularised free‑energy landscape.
+This repository contains the complete code and analysis for the paper
+*"Grokking as Metastable Complexity Dynamics"*. Grokking — the phenomenon
+where a model suddenly generalises long after memorising training data — is
+formalised as a metastable escape in a complexity-regularised free-energy
+landscape.
 
 The code implements:
 
-- **Modular addition** (p=128) as the primary task, using a small transformer.
-- All order parameters defined in the paper: complexity \(C_{\mathrm{norm}}\) and \(C_{\mathrm{PB}}\), alignment \(m(t)\), precision \(q(t)\), test error \(\epsilon_{\mathrm{test}}(t)\).
-- Effective temperature \(T_{\mathrm{eff}}\) estimated using **FlucDis‑SGD** (robust gradient‑difference method).
-- Geometric diagnostics: participation ratio (intrinsic dimensionality).
-- Geometry checkpoints saved at **pre‑transition**, **at‑transition**, and **post‑transition**.
-- Full‑domain evaluation for modular addition (16 384 pairs).
-- **Arrhenius scaling** analysis (log τ vs 1/T_eff) with linear regression.
+- **Modular addition** (p = 128) as the primary task, using a small transformer.
+- All order parameters defined in the paper: complexity C_norm and C_PB,
+  alignment m(t), precision q(t), and test error ε_test(t).
+- Effective temperature T_eff estimated via **FlucDis-SGD** (gradient-difference method).
+- Geometric diagnostics: participation ratio (intrinsic dimensionality) and top
+  Hessian eigenvalues via Lanczos iteration.
+- Geometry checkpoints at **pre-transition**, **at-transition**, and
+  **post-transition**.
+- Full-domain evaluation for modular addition (16 384 pairs).
+- **Arrhenius scaling** analysis (log τ vs B/lr) with linear regression.
 
-The code is self‑contained, uses only PyTorch and standard scientific Python libraries, and is designed for full reproducibility.
+The code is self-contained, uses only PyTorch and standard scientific Python
+libraries, and is designed for full reproducibility.
+
+---
 
 ## Repository Structure
 
-```text
+```
 grokking-metastable/
-├── README.md
+├── run_experiment.py           # Main training script
+├── run_full_sweep.sh           # Runs all experiments then generates figures
 ├── requirements.txt
-├── run_experiment.py          # Main training script (transformer, metrics, checkpoints)
 ├── diagnostics/
 │   ├── __init__.py
-│   ├── geometry.py            # Participation ratio (and Hessian, optional)
-│   └── order_params.py        # Order parameters
-├── reproducibility/
-│   └── reproduce.sh           # Smoke test for modular addition (transformer)
+│   ├── geometry.py             # Participation ratio and Hessian eigenvalues
+│   └── order_params.py         # Order parameters + shared get_tau_grok()
 ├── experiments/
-│   └── sweep_runner.py        # Full Arrhenius sweep (varies learning rate)
-├── analysis/                  # Optional post‑processing scripts (not required)
-│   ├── fit_arrhenius.py
-│   └── phase_diagram.py
-├── runs/                      # Created at runtime – IGNORE PLOTS AND TAU GROK - intermediate step for output
-└── final_output/
-    └── ...                    # Created at runtime - hosts the end results, figures and all data, ensures correctness
+│   ├── sweep_runner.py         # Arrhenius sweep (varies learning rate)
+│   ├── lambda_sweep.py         # Weight-decay sweep
+│   ├── dataset_sweep.py        # Dataset-size sweep
+│   └── causal_test.py          # Causal LR-switch experiment
+├── analysis/
+│   ├── fit_arrhenius.py        # Standalone Arrhenius fit (CLI)
+│   ├── fit_precision.py        # Precision-reallocation figure (CLI)
+│   └── phase_diagram.py        # Phase-diagram heatmaps (CLI)
+├── reproducibility/
+│   └── reproduce.sh            # Quick smoke test
+├── final_output/
+│   └── analyser.py             # Authoritative figure/result generator
+└── data/
+    └── ...                     # Pre-generated paper figures and CSVs
 ```
 
-Requirements
+`runs/` is created at runtime and holds all intermediate logs, checkpoints,
+and diagnostic plots. `final_output/` is populated by `analyser.py` and
+contains the paper-quality figures.
 
-```text
+---
+
+## Requirements
+
+```
 Python 3.8+
-
 PyTorch ≥ 1.12
-
 NumPy, Pandas, Matplotlib, SciPy, PyYAML, tqdm
 ```
 
@@ -60,123 +77,140 @@ Install with:
 pip install -r requirements.txt
 ```
 
-Quick Start (Smoke Test)
-Run a short smoke test to verify that the transformer groks on modular addition:
+---
+
+## Quick Start (Smoke Test)
+
+Verifies that the transformer groks on modular addition (single run,
+~7 000 steps to grokking):
 
 ```bash
 chmod +x reproducibility/reproduce.sh
 ./reproducibility/reproduce.sh
 ```
 
-The smoke test runs a single configuration (n=4000, batch=512, wd=0.3, lr=0.002, max_steps=20000) with logging every 25 steps. Expected output: a folder runs/smoke_transformer/ containing a CSV log and geometry checkpoints. The test should finish without errors and show test_err = 0.000 after ~7000 steps.
+Expected output: `runs/smoke_transformer/` containing a CSV log and three
+geometry checkpoints (`.npz`). The log should show `test_err = 0.000` around
+step 7 000.
 
-Full Experiments (Reproducing the Paper Results)
-The main experiment is an Arrhenius sweep that varies the learning rate (hence the effective temperature 
-T
-e
-f
-f
-T 
-eff
-​
- ) while keeping all other hyperparameters fixed. It uses:
+---
 
-```text
-Task: modular addition (p=128)
+## Full Experiments
 
-Model: tiny transformer (2 layers, 2 heads, embedding 32)
-
-Fixed hyperparameters: n=4000, batch=512, weight_decay=0.3, log_interval=25
-
-Learning rates: 0.0005, 0.001, 0.002, 0.004, 0.008
-
-Seeds: 0,1,2 (3 seeds per learning rate)
-
-Max steps (per learning rate, conservative upper bounds):
-
-0.0005 → 150 000 steps
-
-0.001 → 100 000 steps
-
-0.002, 0.004, 0.008 → 50 000 steps
-```
-
-To run the full sweep:
+### Option A — one command
 
 ```bash
-python experiments/sweep_runner.py
+chmod +x run_full_sweep.sh
+./run_full_sweep.sh
 ```
 
-The script:
+This runs all four sweeps sequentially and then calls `final_output/analyser.py`
+to produce the paper figures.
 
-Runs 15 configurations sequentially (5 LRs × 3 seeds).
+### Option B — individual sweeps
 
-Saves results incrementally to runs/arrhenius_transformer_master.csv.
+All scripts must be run from the **repository root**.
 
-Automatically resumes if interrupted (e.g., after a Kaggle session limit).
+| Command | Description |
+|---|---|
+| `python experiments/sweep_runner.py` | Arrhenius sweep (5 LRs × 3 seeds) |
+| `python experiments/lambda_sweep.py` | Weight-decay sweep (4 λ × 3 seeds) |
+| `python experiments/dataset_sweep.py` | Dataset-size sweep (7 sizes × 3 seeds) |
+| `python experiments/causal_test.py` | Causal LR-switch experiment |
+| `python final_output/analyser.py` | Generate all paper figures |
 
-After all runs finish, it performs a linear regression of 
-log
-⁡
-τ
-grok
-logτ 
-grok
-​
-  vs 
-1
-/
-T
-e
-f
-f
-1/T 
-eff
-​
-  and saves the Arrhenius plot as runs/arrhenius_transformer.png.
+Each sweep script resumes automatically if interrupted.
 
-Runtime: On a single NVIDIA T4 GPU, the full sweep takes approximately 6‑8 hours (due to fine logging interval of 25 steps). The script is resumable, so you can run it over multiple sessions if needed.
+---
 
-Outputs and Metrics
-Each run produces:
+## Arrhenius Sweep Configuration
 
-```text
-CSV log (log_seed{seed}.csv): columns – step, time, train_loss, C_norm, C_PB, m, q_logit, q_ent, test_err, PR, T_eff_proxy.
-
-Geometry checkpoints (.npz):
-
-geometry_pre.npz – at step 0.
-
-geometry_at.npz – at the first step where test_err < 0.1.
-
-geometry_post.npz – at the end of training.
-
-The sweep script also produces arrhenius_transformer.png and a summary CSV with median grokking times.
+```
+Task:                modular addition (p = 128)
+Model:               tiny transformer (2 layers, 2 heads, embedding dim 32)
+Fixed hyperparams:   n = 4000, batch = 512, weight_decay = 0.3, log_interval = 25
+Learning rates:      0.0005, 0.001, 0.002, 0.004, 0.008
+Seeds:               0, 1, 2
+Max steps per LR:    0.0005 → 150 000 | 0.001 → 100 000 | others → 50 000
 ```
 
-Reproducibility Guarantee
-All random seeds are fixed (torch.manual_seed, np.random.seed).
+Runtime on a single NVIDIA T4 GPU: approximately 6–8 hours. All scripts are
+resumable across multiple sessions.
 
-Evaluation uses the full domain (no sampling noise).
+---
 
-The code is deterministic.
+## Outputs and Metrics
 
-The sweep runner saves intermediate results, allowing resumption after interruption.
+Each training run writes to its `--outdir`:
 
-Customisation
-You can modify hyperparameters directly in sweep_runner.py. To add a new task, extend run_experiment.py (datasets, evaluation) – the order parameters and geometric diagnostics work for any classification task.
+| File | Description |
+|---|---|
+| `log_seed{seed}.csv` | Step-wise metrics: `step, time, train_loss, C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, PR, T_eff_proxy` |
+| `checkpoint.pt` | Model and optimiser state for resuming |
+| `geometry_pre.npz` | Geometry snapshot at step 0 |
+| `geometry_at.npz` | Geometry snapshot at first grokking event |
+| `geometry_post.npz` | Geometry snapshot at end of training |
 
-Citation
-If you use this code in your research, please cite the paper:
+`final_output/analyser.py` reads all logs and produces:
+
+| File | Description |
+|---|---|
+| `final_output/all_sweeps_reanalysed.csv` | Combined τ_grok for all sweeps |
+| `final_output/arrhenius_corrected.png` | Arrhenius plot (log τ vs B/lr) |
+| `final_output/dataset_corrected.png` | Dataset-size sweep error-bar plot |
+| `final_output/lambda_corrected.png` | Lambda sweep error-bar plot |
+| `final_output/{sweep}_corrected.csv` | Per-sweep τ_grok values |
+
+---
+
+## Grokking Detection
+
+All scripts share the single authoritative implementation `get_tau_grok()` in
+`diagnostics/order_params.py`. A run is considered to have grokked at the
+first step *t* where:
+
+1. `test_err < 0.1` at step *t*.
+2. `test_err` stays below `0.1` for **5 consecutive** log entries (stability guard).
+3. `train_loss` drops below **0.5** at *any* point in the log (sanity check).
+
+---
+
+## Reproducibility
+
+- All random seeds are fixed (`torch.manual_seed`, `np.random.seed`).
+- Evaluation uses the full domain — no sampling noise.
+- All sweep scripts save results incrementally and resume after interruption.
+
+---
+
+## Optional Analysis Scripts
+
+```bash
+# Standalone Arrhenius fit (reads sweep_runner output directly):
+python analysis/fit_arrhenius.py --master runs/arrhenius_transformer_master.csv
+
+# Precision-reallocation figure for a single log:
+python analysis/fit_precision.py --log runs/arrhenius_transformer/lr_0.002_seed_0/log_seed0.csv
+
+# Phase diagrams (requires a master_results.csv with task/lambda/n columns):
+python analysis/phase_diagram.py --master runs/master_results.csv
+```
+
+---
+
+## Citation
 
 ```bibtex
 @article{lakatos2026grokking,
-  title={Grokking as Metastable Complexity Dynamics},
-  author={Lakatos, Matthew},
-  journal={ ... },
-  year={2026}
+  title   = {Grokking as Metastable Complexity Dynamics},
+  author  = {Lakatos, Matthew},
+  journal = {},
+  year    = {2026}
 }
 ```
 
-License
-MIT License – free for academic use.
+---
+
+## License
+
+MIT License — free for academic use.
