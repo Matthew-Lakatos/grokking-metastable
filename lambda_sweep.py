@@ -1,94 +1,168 @@
-# %% [markdown]
-# # Lambda sweep for modular addition (transformer) – test regularisation effect
+#!/usr/bin/env python3
+"""
+experiments/lambda_sweep.py
+Weight-decay (λ) sweep for modular addition with a transformer.
 
-# %% [code]
-import os, subprocess, time
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+Varies weight decay across [0.1, 0.2, 0.3, 0.4] with 3 seeds each,
+holding all other hyperparameters fixed at the paper defaults.
+
+Results are saved incrementally to ``runs/lambda_sweep_master.csv`` and
+a diagnostic error-bar plot is written to ``runs/lambda_sweep.png``.
+The paper-quality figure is produced by ``final_output/analyser.py``.
+
+Run from the repository root:
+    python experiments/lambda_sweep.py
+"""
+
+import os
+import subprocess
+import time
 from itertools import product
 
-if not os.path.exists("grokking-metastable"):
-    !git clone https://github.com/Matthew-Lakatos/grokking-metastable.git
-os.chdir("grokking-metastable")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-task = "modular_add"
-model = "tiny_transformer"
-n = 4000
-batch = 512
-lr = 0.002                # fixed learning rate (proven to grok)
-lambdas = [0.1, 0.2, 0.3, 0.4]   # weight decay values
-seeds = [0, 1, 2]
-max_steps = 50000         # safe upper bound
-log_interval = 100
-grok_threshold = 0.1
+from diagnostics.order_params import get_tau_grok
 
-master_path = "runs/lambda_sweep_master.csv"
-results = []
-completed = set()
-if os.path.exists(master_path):
-    existing = pd.read_csv(master_path)
-    for _, row in existing.iterrows():
-        completed.add((row['wd'], row['seed']))
-    results = existing.to_dict('records')
-    print(f"Resuming: {len(completed)} runs already completed.")
+# ---------------------------------------------------------------------------
+# Sweep configuration
+# ---------------------------------------------------------------------------
+TASK         = "modular_add"
+MODEL        = "tiny_transformer"
+N            = 4000
+BATCH        = 512
+LR           = 0.002        # Fixed learning rate (reliably groks).
+LAMBDAS      = [0.1, 0.2, 0.3, 0.4]
+SEEDS        = [0, 1, 2]
+MAX_STEPS    = 50_000
+LOG_INTERVAL = 100
+GROK_THRESHOLD = 0.1
 
-total = len(lambdas) * len(seeds)
-run_idx = len(completed)
+MASTER_CSV = "runs/lambda_sweep_master.csv"
 
-for wd, seed in product(lambdas, seeds):
-    if (wd, seed) in completed:
-        continue
-    run_idx += 1
-    outdir = f"runs/lambda_sweep/wd_{wd}_seed_{seed}"
-    os.makedirs(outdir, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def run_single(wd, seed, outdir):
+    """Launch run_experiment.py and return tau_grok."""
     cmd = [
         "python", "run_experiment.py",
-        "--task", task,
-        "--model", model,
-        "--n", str(n),
-        "--batch", str(batch),
-        "--wd", str(wd),
-        "--lr", str(lr),
-        "--seed", str(seed),
-        "--outdir", outdir,
-        "--max_steps", str(max_steps),
-        "--log_interval", str(log_interval),
-        "--grok_threshold", str(grok_threshold)
+        "--task",           TASK,
+        "--model",          MODEL,
+        "--n",              str(N),
+        "--batch",          str(BATCH),
+        "--wd",             str(wd),
+        "--lr",             str(LR),
+        "--seed",           str(seed),
+        "--outdir",         outdir,
+        "--max_steps",      str(MAX_STEPS),
+        "--log_interval",   str(LOG_INTERVAL),
+        "--grok_threshold", str(GROK_THRESHOLD),
     ]
-    print(f"[{run_idx}/{total}] wd={wd} seed={seed}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"  Error: {result.stderr}")
-        tau = np.nan
+        print(f"  [ERROR] {result.stderr.strip()}")
+        return np.nan
+
+    log_path = os.path.join(outdir, f"log_seed{seed}.csv")
+    return get_tau_grok(log_path, grok_threshold=GROK_THRESHOLD)
+
+
+# ---------------------------------------------------------------------------
+# Main sweep
+# ---------------------------------------------------------------------------
+
+def run_sweep():
+    os.makedirs("runs", exist_ok=True)
+
+    # Resume.
+    results = []
+    completed = set()
+    if os.path.exists(MASTER_CSV):
+        existing = pd.read_csv(MASTER_CSV)
+        for _, row in existing.iterrows():
+            completed.add((row['wd'], row['seed']))
+        results = existing.to_dict('records')
+        print(f"Resuming — {len(completed)} run(s) already completed.")
     else:
-        log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-        if os.path.exists(log_path):
-            df = pd.read_csv(log_path)
-            grok_mask = df['test_err'] < grok_threshold
-            if grok_mask.any():
-                tau = df[grok_mask]['step'].iloc[0]
-                print(f"  -> tau_grok = {tau}")
-            else:
-                tau = np.nan
-                print(f"  -> No grokking")
-    results.append({'wd': wd, 'seed': seed, 'tau_grok': tau})
-    pd.DataFrame(results).to_csv(master_path, index=False)
+        print("Starting new lambda sweep.")
 
-# Path to the CSV file (adjust if needed)
-csv_path = "runs/lambda_sweep_master.csv"
+    total   = len(LAMBDAS) * len(SEEDS)
+    run_idx = len(completed)
 
-# Load data
-df = pd.read_csv(csv_path)
+    for wd, seed in product(LAMBDAS, SEEDS):
+        if (wd, seed) in completed:
+            continue
 
-# Remove any rows with NaN (if some λ didn't grok)
-df = df[df['tau_grok'].notna()]
+        run_idx += 1
+        outdir = f"runs/lambda_sweep/wd_{wd}_seed_{seed}"
+        os.makedirs(outdir, exist_ok=True)
 
-# Compute median, Q1, Q3 per λ
-summary = df.groupby('wd')['tau_grok'].agg(
-    median='median',
-    q25=lambda x: x.quantile(0.25),
-    q75=lambda x: x.quantile(0.75)
-).reset_index()
-summary['yerr_low'] = summary['median'] - summary['q25']
-summary['yerr_high'] = summary['q75'] - summary['median']
+        print(f"[{run_idx}/{total}] wd={wd}  seed={seed}")
+        t0 = time.time()
+        tau = run_single(wd, seed, outdir)
+        elapsed = time.time() - t0
+
+        if np.isnan(tau):
+            print(f"  -> No grokking detected  ({elapsed / 60:.1f} min)")
+        else:
+            print(f"  -> tau_grok={tau:.0f}  ({elapsed / 60:.1f} min)")
+
+        results.append({'wd': wd, 'seed': seed, 'tau_grok': tau})
+        pd.DataFrame(results).to_csv(MASTER_CSV, index=False)
+
+    print(f"\nAll runs complete. Results saved to {MASTER_CSV!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic plot
+# ---------------------------------------------------------------------------
+
+def plot_summary():
+    """
+    Error-bar plot of median grokking time vs. weight decay.
+
+    Diagnostic only; authoritative figure comes from final_output/analyser.py.
+    """
+    df = pd.read_csv(MASTER_CSV)
+    df = df[df['tau_grok'].notna()]
+
+    if df.empty:
+        print("No valid grokking times to plot.")
+        return
+
+    summary = df.groupby('wd')['tau_grok'].agg(
+        median='median',
+        q25=lambda x: x.quantile(0.25),
+        q75=lambda x: x.quantile(0.75),
+    ).reset_index()
+    summary['yerr_low']  = summary['median'] - summary['q25']
+    summary['yerr_high'] = summary['q75']   - summary['median']
+
+    plt.figure(figsize=(7, 5))
+    plt.errorbar(
+        summary['wd'], summary['median'],
+        yerr=[summary['yerr_low'], summary['yerr_high']],
+        fmt='o-', capsize=5,
+    )
+    plt.xlabel('Weight decay λ')
+    plt.ylabel('Grokking time τ (steps)')
+    plt.title('Lambda sweep — modular addition (transformer) [diagnostic]')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out_path = "runs/lambda_sweep.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Diagnostic plot saved to {out_path!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    run_sweep()
+    plot_summary()
