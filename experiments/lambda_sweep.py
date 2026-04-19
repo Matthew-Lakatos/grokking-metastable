@@ -36,7 +36,7 @@ LR           = 0.002        # Fixed learning rate (reliably groks).
 LAMBDAS      = [0.1, 0.2, 0.3, 0.4]
 SEEDS        = [0, 1, 2]
 MAX_STEPS    = 50_000
-LOG_INTERVAL = 100
+LOG_INTERVAL = 25
 GROK_THRESHOLD = 0.1
 
 MASTER_CSV = "runs/lambda_sweep_master.csv"
