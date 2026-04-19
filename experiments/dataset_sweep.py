@@ -1,97 +1,168 @@
-# %% [markdown]
-# # Dataset Size Sweep (Sparser Grid, Resume)
-# - wide range of n values
-# - 3 seeds
-# - max_steps = 100000
-# - log_interval = 25
+#!/usr/bin/env python3
+"""
+experiments/dataset_sweep.py
+Dataset-size sweep for modular addition with a transformer.
 
-# %% [code]
-import os, subprocess, time
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+Varies training-set size n across [2000, 3000, 4000, 5000, 6000, 7000, 8000]
+with 3 seeds each, holding all other hyperparameters fixed at the paper defaults.
+
+Results are saved incrementally to ``runs/dataset_sweep_master.csv`` and a
+diagnostic error-bar plot is written to ``runs/dataset_sweep.png``.
+The paper-quality figure is produced by ``final_output/analyser.py``.
+
+Run from the repository root:
+    python experiments/dataset_sweep.py
+"""
+
+import os
+import subprocess
+import time
 from itertools import product
 
-if not os.path.exists("grokking-metastable"):
-    !git clone https://github.com/Matthew-Lakatos/grokking-metastable.git
-os.chdir("grokking-metastable")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-task = "modular_add"
-model = "tiny_transformer"
-batch = 512
-wd = 0.3
-lr = 0.002
-max_steps = 100000
-log_interval = 25
-grok_threshold = 0.1
-ns = [2000, 3000, 4000, 5000, 6000, 7000, 8000]   # grid
-seeds = [0, 1, 2]
+from diagnostics.order_params import get_tau_grok
 
-def get_tau_grok(csv_path, grok_threshold=0.1, train_loss_thresh=0.1, min_residence=25):
-    if not os.path.exists(csv_path):
-        return np.nan
-    df = pd.read_csv(csv_path)
-    grok_mask = df['test_err'] < grok_threshold
-    if not grok_mask.any():
-        return np.nan
-    first_grok = df[grok_mask]['step'].iloc[0]
-    df_before = df[df['step'] <= first_grok]
-    low_loss = df_before['train_loss'] < train_loss_thresh
-    if not low_loss.any():
-        return np.nan
-    t0 = df_before[low_loss]['step'].iloc[0]
-    if first_grok - t0 < min_residence:
-        return np.nan
-    return first_grok
+# ---------------------------------------------------------------------------
+# Sweep configuration
+# ---------------------------------------------------------------------------
+TASK         = "modular_add"
+MODEL        = "tiny_transformer"
+BATCH        = 512
+WEIGHT_DECAY = 0.3
+LR           = 0.002
+DATASET_SIZES = [2000, 3000, 4000, 5000, 6000, 7000, 8000]
+SEEDS         = [0, 1, 2]
+MAX_STEPS     = 100_000
+LOG_INTERVAL  = 25
+GROK_THRESHOLD = 0.1
 
-# Load existing results
-results = []
-completed = set()
-results_file = "dataset_sweep_results.csv"
-if os.path.exists(results_file):
-    existing = pd.read_csv(results_file)
-    for _, row in existing.iterrows():
-        completed.add((row['n'], row['seed']))
-    results = existing.to_dict('records')
-    print(f"Resuming: {len(completed)} runs already completed.")
+MASTER_CSV = "runs/dataset_sweep_master.csv"
 
-total = len(ns) * len(seeds)
-run_idx = len(completed)
 
-for n, seed in product(ns, seeds):
-    if (n, seed) in completed:
-        continue
-    run_idx += 1
-    outdir = f"runs/dataset_sweep/n_{n}_seed_{seed}"
-    os.makedirs(outdir, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def run_single(n, seed, outdir):
+    """Launch run_experiment.py and return tau_grok."""
     cmd = [
         "python", "run_experiment.py",
-        "--task", task, "--model", model,
-        "--n", str(n), "--batch", str(batch), "--wd", str(wd),
-        "--lr", str(lr), "--seed", str(seed),
-        "--outdir", outdir, "--max_steps", str(max_steps),
-        "--log_interval", str(log_interval), "--grok_threshold", str(grok_threshold)
+        "--task",           TASK,
+        "--model",          MODEL,
+        "--n",              str(n),
+        "--batch",          str(BATCH),
+        "--wd",             str(WEIGHT_DECAY),
+        "--lr",             str(LR),
+        "--seed",           str(seed),
+        "--outdir",         outdir,
+        "--max_steps",      str(MAX_STEPS),
+        "--log_interval",   str(LOG_INTERVAL),
+        "--grok_threshold", str(GROK_THRESHOLD),
     ]
-    print(f"[{run_idx}/{total}] n={n}, seed={seed}")
-    start = time.time()
-    subprocess.run(cmd)
-    elapsed = time.time() - start
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  [ERROR] {result.stderr.strip()}")
+        return np.nan
+
     log_path = os.path.join(outdir, f"log_seed{seed}.csv")
-    tau = get_tau_grok(log_path)
-    results.append({'n': n, 'seed': seed, 'tau_grok': tau})
-    print(f"  -> tau_grok = {tau} (time {elapsed/60:.1f} min)")
-
-    # Save incrementally
-    pd.DataFrame(results).to_csv(results_file, index=False)
-
-# Summary
-df_res = pd.read_csv(results_file)
-summary = df_res.groupby('n').agg(
-    median_tau=('tau_grok', 'median'),
-    q25=('tau_grok', lambda x: x.quantile(0.25)),
-    q75=('tau_grok', lambda x: x.quantile(0.75))
-).reset_index()
-summary['yerr_low'] = summary['median_tau'] - summary['q25']
-summary['yerr_high'] = summary['q75'] - summary['median_tau']
+    return get_tau_grok(log_path, grok_threshold=GROK_THRESHOLD)
 
 
+# ---------------------------------------------------------------------------
+# Main sweep
+# ---------------------------------------------------------------------------
+
+def run_sweep():
+    os.makedirs("runs", exist_ok=True)
+
+    # Resume.
+    results = []
+    completed = set()
+    if os.path.exists(MASTER_CSV):
+        existing = pd.read_csv(MASTER_CSV)
+        for _, row in existing.iterrows():
+            completed.add((int(row['n']), int(row['seed'])))
+        results = existing.to_dict('records')
+        print(f"Resuming — {len(completed)} run(s) already completed.")
+    else:
+        print("Starting new dataset-size sweep.")
+
+    total   = len(DATASET_SIZES) * len(SEEDS)
+    run_idx = len(completed)
+
+    for n, seed in product(DATASET_SIZES, SEEDS):
+        if (n, seed) in completed:
+            continue
+
+        run_idx += 1
+        outdir = f"runs/dataset_sweep/n_{n}_seed_{seed}"
+        os.makedirs(outdir, exist_ok=True)
+
+        print(f"[{run_idx}/{total}] n={n}  seed={seed}")
+        t0 = time.time()
+        tau = run_single(n, seed, outdir)
+        elapsed = time.time() - t0
+
+        if np.isnan(tau):
+            print(f"  -> No grokking detected  ({elapsed / 60:.1f} min)")
+        else:
+            print(f"  -> tau_grok={tau:.0f}  ({elapsed / 60:.1f} min)")
+
+        results.append({'n': n, 'seed': seed, 'tau_grok': tau})
+        pd.DataFrame(results).to_csv(MASTER_CSV, index=False)
+
+    print(f"\nAll runs complete. Results saved to {MASTER_CSV!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic plot
+# ---------------------------------------------------------------------------
+
+def plot_summary():
+    """
+    Error-bar plot of median grokking time vs. dataset size.
+
+    Diagnostic only; authoritative figure comes from final_output/analyser.py.
+    """
+    df = pd.read_csv(MASTER_CSV)
+    df = df[df['tau_grok'].notna()]
+
+    if df.empty:
+        print("No valid grokking times to plot.")
+        return
+
+    summary = df.groupby('n')['tau_grok'].agg(
+        median='median',
+        q25=lambda x: x.quantile(0.25),
+        q75=lambda x: x.quantile(0.75),
+    ).reset_index()
+    summary['yerr_low']  = summary['median'] - summary['q25']
+    summary['yerr_high'] = summary['q75']   - summary['median']
+
+    plt.figure(figsize=(8, 5))
+    plt.errorbar(
+        summary['n'], summary['median'],
+        yerr=[summary['yerr_low'], summary['yerr_high']],
+        fmt='o-', capsize=5,
+    )
+    plt.xlabel('Dataset size n')
+    plt.ylabel('Grokking time τ (steps)')
+    plt.title('Dataset-size sweep — modular addition (transformer) [diagnostic]')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out_path = "runs/dataset_sweep.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Diagnostic plot saved to {out_path!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    run_sweep()
+    plot_summary()
