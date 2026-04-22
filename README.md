@@ -1,216 +1,123 @@
-# Grokking as Metastable Complexity Dynamics
+Grokking as Metastable Complexity Dynamics
 
-**Author:** Matthew Lakatos  
-**Contact:** m.atthew.lakatos1@gmail.com
+Matthew Lakatos
+m.atthew.lakatos1@gmail.com
 
-## Overview
+What this is
 
-This repository contains the complete code and analysis for the paper
-*"Grokking as Metastable Complexity Dynamics"*. Grokking — the phenomenon
-where a model suddenly generalises long after memorising training data — is
-formalised as a metastable escape in a complexity-regularised free-energy
-landscape.
+This repo is the result of me trying to understand grokking — the weird behaviour where a model memorises for ages and then suddenly just gets it.
+I originally tried to formalise it as a kind of metastable transition (inspired by physics / noisy optimisation ideas), but this repo is not a finished theory. It’s more like:
+a collection of experiments, diagnostics, and partial explanations that seem to line up with that idea in some cases
+Some parts worked, some didn’t, and I’ve kept both.
 
-The code implements:
+What I actually did
 
-- **Modular addition** (p = 128) as the primary task, using a small transformer.
-- All order parameters defined in the paper: complexity C_norm and C_PB,
-  alignment m(t), precision q(t), and test error ε_test(t).
-- Effective temperature T_eff estimated via **FlucDis-SGD** (gradient-difference method).
-- Geometric diagnostics: participation ratio (intrinsic dimensionality) and top
-  Hessian eigenvalues via Lanczos iteration.
-- Geometry checkpoints at **pre-transition**, **at-transition**, and
-  **post-transition**.
-- Full-domain evaluation for modular addition (16 384 pairs).
-- **Arrhenius scaling** analysis (log τ vs B/lr) with linear regression.
+Most of this is built around modular addition (mod 128) with a small transformer.
+I tracked a bunch of things during training:
+train loss vs test error (to see the grokking jump clearly)
+some “complexity” proxies (C_norm, C_PB)
+alignment + precision-style metrics (honestly still figuring out how meaningful these are)
+geometry:
+participation ratio (rough intrinsic dimension)
+top Hessian eigenvalues (very noisy but sometimes interesting)
 
-The code is self-contained, uses only PyTorch and standard scientific Python
-libraries, and is designed for full reproducibility.
+I also ran sweeps over:
+learning rate
+weight decay
+dataset size
+and tried a causal thing where I switch the learning rate mid-training to see if it forces earlier generalisation.
 
----
+What seems to happen (empirically)
 
-## Repository Structure
+Across runs, the same pattern shows up:
+the model memorises first
+train loss drops quickly
+test error stays high
+then after a long time, it suddenly generalises
+test error collapses
+not much change in train loss
+That part is well-known, but:
+the timing is very sensitive to hyperparameters
+smaller datasets / higher regularisation tend to change when (or if) it happens
+some setups just never grok
+The geometry stuff sometimes shows a shift around the transition (e.g. participation ratio dropping), but it’s not clean enough to claim anything strong.
 
-```
-grokking-metastable/
-├── run_experiment.py           # Main training script
-├── run_full_sweep.sh           # Runs all experiments then generates figures
-├── requirements.txt
-├── diagnostics/
-│   ├── __init__.py
-│   ├── geometry.py             # Participation ratio and Hessian eigenvalues
-│   └── order_params.py         # Order parameters + shared get_tau_grok()
-├── experiments/
-│   ├── sweep_runner.py         # Arrhenius sweep (varies learning rate)
-│   ├── lambda_sweep.py         # Weight-decay sweep
-│   ├── dataset_sweep.py        # Dataset-size sweep
-│   └── causal_test.py          # Causal LR-switch experiment
-├── analysis/
-│   ├── fit_arrhenius.py        # Standalone Arrhenius fit (CLI)
-│   ├── fit_precision.py        # Precision-reallocation figure (CLI)
-│   └── phase_diagram.py        # Phase-diagram heatmaps (CLI)
-├── reproducibility/
-│   └── reproduce.sh            # Quick smoke test
-├── final_output/
-│   └── analyser.py             # Authoritative figure/result generator
-└── data/
-    └── ...                     # Pre-generated paper figures and CSVs
-```
+The idea I was testing
 
-`runs/` is created at runtime and holds all intermediate logs, checkpoints,
-and diagnostic plots. `final_output/` is populated by `analyser.py` and
-contains the paper-quality figures.
+The rough picture I had in mind:
+optimisation finds easy memorisation solutions first
+these are “good enough” locally but don’t generalise
+over time, SGD noise (or something like it) pushes the model elsewhere
+eventually it lands in a simpler / more structured solution
+that’s when generalisation suddenly appears
+You can think of it loosely as:
+moving between different regions of parameter space, not just improving one solution
 
----
+I tried to connect this to:
+noise in SGD
+scaling of transition time with learning rate
+“barrier crossing” type intuition
+Some of the scaling plots look vaguely Arrhenius-like, but I’m not confident enough to claim that as a result — it’s more of a direction than a conclusion.
 
-## Requirements
+Things that didn’t work / are unclear
+MLPs didn’t really show the same behaviour (at least with the setups I used)
+one-hot encodings seemed to break any hope of generalisation
+some metrics I tracked look nice but I’m not convinced they actually explain anything
+the “free energy” framing I started with is probably too hand-wavy as it stands
 
-```
-Python 3.8+
-PyTorch ≥ 1.12
-NumPy, Pandas, Matplotlib, SciPy, PyYAML, tqdm
-```
+Also:
 
-Install with:
+I don’t think I’ve isolated the actual mechanism yet
 
-```bash
-pip install -r requirements.txt
-```
+What this repo is useful for
 
----
+reproducing grokking on a controlled task
+seeing how hyperparameters affect the transition
+having a bunch of diagnostics in one place
+experimenting with your own ideas on top
+It’s basically a sandbox for this phenomenon.
 
-## Quick Start (Smoke Test)
+Running stuff
 
-Verifies that the transformer groks on modular addition (single run,
-~7 000 steps to grokking):
+Quick test:
 
 ```bash
 chmod +x reproducibility/reproduce.sh
 ./reproducibility/reproduce.sh
 ```
 
-Expected output: `runs/smoke_transformer/` containing a CSV log and three
-geometry checkpoints (`.npz`). The log should show `test_err = 0.000` around
-step 7 000.
-
----
-
-## Full Experiments
-
-### Option A — one command
-
+Full sweeps:
 ```bash
 chmod +x run_full_sweep.sh
 ./run_full_sweep.sh
 ```
+Or run things individually from experiments/.
+Everything logs to runs/.
 
-This runs all four sweeps sequentially and then calls `final_output/analyser.py`
-to produce the paper figures.
+Outputs
 
-### Option B — individual sweeps
+Each run gives you:
+a CSV log (all metrics over time)
+checkpoints
+a few saved geometry snapshots
+There’s also a script in final_output/ that pulls everything together into plots.
+Where I think this goes next
 
-All scripts must be run from the **repository root**.
+If I continue this, I’d want to:
+properly compare against existing explanations (didn’t do this well enough)
+clean up which metrics actually matter vs which just look interesting
+understand why architecture matters (transformer vs MLP)
+test on something beyond modular arithmetic
+make the “metastability” idea either precise or drop it
 
-| Command | Description |
-|---|---|
-| `python experiments/sweep_runner.py` | Arrhenius sweep (5 LRs × 3 seeds) |
-| `python experiments/lambda_sweep.py` | Weight-decay sweep (4 λ × 3 seeds) |
-| `python experiments/dataset_sweep.py` | Dataset-size sweep (7 sizes × 3 seeds) |
-| `python experiments/causal_test.py` | Causal LR-switch experiment |
-| `python final_output/analyser.py` | Generate all paper figures |
+Final note
+This started as an attempt to write a full paper and got desk rejected, mostly due to weak argumentation / positioning.
+Looking back, that’s fair — I jumped too quickly to a clean narrative without fully grounding it.
 
-Each sweep script resumes automatically if interrupted.
+I’m leaving this repo up as:
 
----
+the actual work, not the polished version
+If you’re interested in grokking, feel free to use or build on anything here.
 
-## Arrhenius Sweep Configuration
-
-```
-Task:                modular addition (p = 128)
-Model:               tiny transformer (2 layers, 2 heads, embedding dim 32)
-Fixed hyperparams:   n = 4000, batch = 512, weight_decay = 0.3, log_interval = 25
-Learning rates:      0.0005, 0.001, 0.002, 0.004, 0.008
-Seeds:               0, 1, 2
-Max steps per LR:    0.0005 → 150 000 | 0.001 → 100 000 | others → 50 000
-```
-
-Runtime on a single NVIDIA T4 GPU: approximately 6–8 hours. All scripts are
-resumable across multiple sessions.
-
----
-
-## Outputs and Metrics
-
-Each training run writes to its `--outdir`:
-
-| File | Description |
-|---|---|
-| `log_seed{seed}.csv` | Step-wise metrics: `step, time, train_loss, C_norm, C_PB, m, q_logit, q_ent, test_err, hess_top, PR, T_eff_proxy` |
-| `checkpoint.pt` | Model and optimiser state for resuming |
-| `geometry_pre.npz` | Geometry snapshot at step 0 |
-| `geometry_at.npz` | Geometry snapshot at first grokking event |
-| `geometry_post.npz` | Geometry snapshot at end of training |
-
-`final_output/analyser.py` reads all logs and produces:
-
-| File | Description |
-|---|---|
-| `final_output/all_sweeps_reanalysed.csv` | Combined τ_grok for all sweeps |
-| `final_output/arrhenius_corrected.png` | Arrhenius plot (log τ vs B/lr) |
-| `final_output/dataset_corrected.png` | Dataset-size sweep error-bar plot |
-| `final_output/lambda_corrected.png` | Lambda sweep error-bar plot |
-| `final_output/{sweep}_corrected.csv` | Per-sweep τ_grok values |
-
----
-
-## Grokking Detection
-
-All scripts share the single authoritative implementation `get_tau_grok()` in
-`diagnostics/order_params.py`. A run is considered to have grokked at the
-first step *t* where:
-
-1. `test_err < 0.1` at step *t*.
-2. `test_err` stays below `0.1` for **5 consecutive** log entries (stability guard).
-3. `train_loss` drops below **0.5** at *any* point in the log (sanity check).
-
----
-
-## Reproducibility
-
-- All random seeds are fixed (`torch.manual_seed`, `np.random.seed`).
-- Evaluation uses the full domain — no sampling noise.
-- All sweep scripts save results incrementally and resume after interruption.
-
----
-
-## Optional Analysis Scripts
-
-```bash
-# Standalone Arrhenius fit (reads sweep_runner output directly):
-python analysis/fit_arrhenius.py --master runs/arrhenius_transformer_master.csv
-
-# Precision-reallocation figure for a single log:
-python analysis/fit_precision.py --log runs/arrhenius_transformer/lr_0.002_seed_0/log_seed0.csv
-
-# Phase diagrams (requires a master_results.csv with task/lambda/n columns):
-python analysis/phase_diagram.py --master runs/master_results.csv
-```
-
----
-
-## Citation
-
-```bibtex
-@article{lakatos2026grokking,
-  title   = {Grokking as Metastable Complexity Dynamics},
-  author  = {Lakatos, Matthew},
-  journal = {},
-  year    = {2026}
-}
-```
-
----
-
-## License
-
-MIT License — free for academic use.
+License
+MIT
